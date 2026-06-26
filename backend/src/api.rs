@@ -42,9 +42,17 @@ impl AppState {
         let runtime = self.runtime.read().await.clone();
         let snapshot = self.store.snapshot().await;
         let next_run_at = next_keyword_run_at(&snapshot.settings).or(runtime.next_run_at);
+        let telegram_connected = if self.telegram.is_connected().await {
+            true
+        } else {
+            self.telegram
+                .ensure_client(&snapshot.telegram)
+                .await
+                .is_ok()
+        };
 
         RuntimeStatus {
-            telegram_connected: self.telegram.is_connected().await,
+            telegram_connected,
             login_waiting_for: self.telegram.waiting_for().await,
             scanning: runtime.scanning,
             last_run_at: runtime.last_run_at,
