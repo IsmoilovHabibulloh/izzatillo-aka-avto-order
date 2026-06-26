@@ -26,11 +26,6 @@ fn flood_wait_secs(err: &anyhow::Error) -> Option<i64> {
 /// shuncha daqiqa kutib turamiz; shu vaqtdan keyin baribir qayta yuborishga ruxsat.
 const ORDER_RECHECK_MINUTES: i64 = 10;
 
-/// SMMMAIN `status` endpointini eng ko'pi bilan shu sekundda bir marta chaqiramiz.
-/// Skan intervali kichik (masalan 5s) bo'lsa ham, bir order uchun status so'rovi
-/// shu vaqtdan tez-tez yuborilmaydi — API rate-limitiga tushmaslik uchun.
-const ORDER_STATUS_MIN_RECHECK_SECONDS: i64 = 30;
-
 pub async fn scanner_loop(state: AppState) {
     loop {
         let interval = state.store.settings().await.interval_seconds.max(2);
@@ -494,12 +489,15 @@ async fn process_scan_actions(
     logs
 }
 
-/// Berilgan link uchun order (qayta) yuborilishini hal qiladi.
+/// Berilgan link uchun order (qayta) yuborilishini hal qiladi (foydalanuvchi spec'i):
 ///
-/// - Yozuv yo'q bo'lsa → yuboriladi (birinchi marta).
-/// - Oxirgi orderdan `ORDER_RECHECK_MINUTES` daqiqa o'tgan bo'lsa → qayta yuboriladi.
-/// - Aks holda oldingi order holati tekshiriladi: bajarilgan bo'lsa → qayta yuboriladi,
-///   hali bajarilayotgan/noma'lum bo'lsa → kutiladi.
+/// 1. Yozuv yo'q → birinchi marta yuboriladi.
+/// 2. Oldingi order holati smmmain'dan olinadi:
+///    - bajarilgan (Completed va h.k.) → qayta yuboriladi;
+///    - hali bajarilmoqda (Pending/Processing...):
+///        - oxirgi orderdan `ORDER_RECHECK_MINUTES` daqiqa o'tgan bo'lsa → baribir qayta yuboriladi;
+///        - aks holda → o'tkazib yuboriladi.
+///    - holatni aniqlab bo'lmasa → faqat 10 daqiqa o'tgach qayta yuboriladi (ikki marta pul ketmasligi uchun).
 async fn decide_order(
     state: &AppState,
     record: &Option<OrderRecord>,
@@ -510,55 +508,58 @@ async fn decide_order(
     };
 
     let elapsed = (now - record.created_at).num_minutes();
-    if elapsed >= ORDER_RECHECK_MINUTES {
-        return OrderDecision::Place(format!(
-            "oldingi orderdan {elapsed} daqiqa o'tdi, qayta yuboriladi"
-        ));
-    }
 
+    // Oldingi urinish muvaffaqiyatsiz bo'lgan (order id yo'q) — ikki marta pul ketmasligi
+    // uchun faqat 10 daqiqa o'tgach qayta urinamiz.
     let Some(order_id) = record.order_id.as_deref() else {
-        return OrderDecision::Wait(
-            "oldingi urinish muvaffaqiyatsiz edi, qayta urinishdan oldin kutilyapti".to_string(),
-        );
+        return if elapsed >= ORDER_RECHECK_MINUTES {
+            OrderDecision::Place(format!(
+                "oldingi urinish muvaffaqiyatsiz edi, {elapsed} daqiqa o'tdi — qayta yuboriladi"
+            ))
+        } else {
+            OrderDecision::Wait(
+                "oldingi urinish muvaffaqiyatsiz edi, 10 daqiqa kutilyapti".to_string(),
+            )
+        };
     };
 
-    // Status endpointini juda tez-tez chaqirmaymiz: oxirgi tekshiruvdan beri
-    // ORDER_STATUS_MIN_RECHECK_SECONDS o'tmagan bo'lsa, eski holat bilan kutamiz.
-    if let Some(last) = record.last_checked_at {
-        if (now - last).num_seconds() < ORDER_STATUS_MIN_RECHECK_SECONDS {
-            return OrderDecision::Wait(format!(
-                "oldingi order yaqinda tekshirilgan (holat: {})",
-                record.status.clone().unwrap_or_else(|| "noma'lum".to_string())
-            ));
-        }
-    }
-
+    // 1) Oldingi orderning HOZIRGI holatini har safar smmmain'dan olamiz (kechiktirmasdan).
     match state.smmmain.order_status(order_id).await {
         Ok(outcome) => {
             let label = outcome
                 .status
                 .clone()
                 .unwrap_or_else(|| "noma'lum".to_string());
-            // Yangi holatni xotirada yangilaymiz (last_checked_at = now), shunda
-            // throttle keyingi safar to'g'ri ishlaydi.
             state
                 .store
                 .touch_order_status(&record.link, outcome.status.clone(), now)
                 .await;
-            if is_order_active(outcome.status.as_deref()) {
-                OrderDecision::Wait(format!("oldingi order hali bajarilmoqda (holat: {label})"))
+
+            if !is_order_active(outcome.status.as_deref()) {
+                // 2a) Bajarilgan → qayta yuboriladi.
+                OrderDecision::Place(format!("oldingi order bajarilgan (holat: {label})"))
+            } else if elapsed >= ORDER_RECHECK_MINUTES {
+                // 2b) Hali bajarilmagan, lekin 10 daqiqa o'tdi → baribir qayta yuboriladi.
+                OrderDecision::Place(format!(
+                    "oldingi order {elapsed} daqiqadan beri bajarilmadi (holat: {label}) — qayta yuboriladi"
+                ))
             } else {
-                OrderDecision::Place(format!("oldingi order yakunlandi (holat: {label})"))
+                // 2c) Hali bajarilmagan va 10 daqiqa bo'lmagan → o'tkazib yuboriladi.
+                OrderDecision::Wait(format!(
+                    "oldingi order hali bajarilmoqda (holat: {label}), {elapsed}/{ORDER_RECHECK_MINUTES} daqiqa — o'tkazib yuborildi"
+                ))
             }
         }
         Err(err) => {
-            // Tekshirish vaqtini yangilaymiz, shunda xato beruvchi endpointni
-            // darhol qayta urinmaymiz.
-            state
-                .store
-                .touch_order_status(&record.link, record.status.clone(), now)
-                .await;
-            OrderDecision::Wait(format!("oldingi order holatini olib bo'lmadi: {err}"))
+            // Holatni aniqlab bo'lmadi. Ikki marta pul ketmasligi uchun faqat 10 daqiqa
+            // o'tgan bo'lsagina qayta yuboramiz.
+            if elapsed >= ORDER_RECHECK_MINUTES {
+                OrderDecision::Place(format!(
+                    "order holatini olib bo'lmadi ({err}), {elapsed} daqiqa o'tdi — qayta yuboriladi"
+                ))
+            } else {
+                OrderDecision::Wait(format!("order holatini olib bo'lmadi: {err}"))
+            }
         }
     }
 }
