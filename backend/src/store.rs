@@ -1,6 +1,6 @@
 use crate::models::{
-    AdResult, DEFAULT_SMMMAIN_SERVICE_ID, KeywordRule, PanelLog, PersistedState, Settings,
-    TelegramSettings,
+    AdResult, DEFAULT_SMMMAIN_SERVICE_ID, KeywordRule, OrderRecord, PanelLog, PersistedState,
+    Settings, TelegramSettings,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -102,8 +102,41 @@ impl Store {
             let mut state = self.inner.write().await;
             state.results.clear();
             state.seen.clear();
+            state.orders.clear();
         }
         self.save().await
+    }
+
+    /// Berilgan link (key matni) uchun oxirgi order yozuvini qaytaradi.
+    pub async fn order_record(&self, link: &str) -> Option<OrderRecord> {
+        let key = link.trim().to_lowercase();
+        self.inner.read().await.orders.get(&key).cloned()
+    }
+
+    /// Order yozuvini yangilaydi va diskka saqlaydi (haqiqiy order yuborilganda).
+    pub async fn upsert_order_record(&self, record: OrderRecord) -> Result<()> {
+        let key = record.link.trim().to_lowercase();
+        {
+            let mut state = self.inner.write().await;
+            state.orders.insert(key, record);
+        }
+        self.save().await
+    }
+
+    /// Order holatini xotirada yangilaydi (diskka yozmaydi — bu faqat kuzatuv
+    /// ma'lumoti va har skanда saqlash diskni ortiqcha yuklamasligi uchun).
+    pub async fn touch_order_status(
+        &self,
+        link: &str,
+        status: Option<String>,
+        checked_at: DateTime<Utc>,
+    ) {
+        let key = link.trim().to_lowercase();
+        let mut state = self.inner.write().await;
+        if let Some(record) = state.orders.get_mut(&key) {
+            record.status = status;
+            record.last_checked_at = Some(checked_at);
+        }
     }
 
     pub async fn push_logs(&self, mut logs: Vec<PanelLog>) -> Result<usize> {

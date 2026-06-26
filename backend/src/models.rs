@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub const DEFAULT_SMMMAIN_SERVICE_ID: u64 = 875;
 
@@ -44,6 +44,7 @@ impl Default for Settings {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KeywordRule {
+    #[serde(default)]
     pub text: String,
     #[serde(default = "default_interval_seconds")]
     pub interval_seconds: u64,
@@ -132,6 +133,8 @@ pub struct PersistedState {
     pub seen: HashSet<String>,
     #[serde(default)]
     pub logs: Vec<PanelLog>,
+    #[serde(default)]
+    pub orders: HashMap<String, OrderRecord>,
 }
 
 impl Default for PersistedState {
@@ -142,8 +145,25 @@ impl Default for PersistedState {
             results: Vec::new(),
             seen: HashSet::new(),
             logs: Vec::new(),
+            orders: HashMap::new(),
         }
     }
+}
+
+/// Har bir order linki (key matni) uchun oxirgi yuborilgan order holati.
+/// Bir xil reklama qayta topilganda qayta order yuborish-yubormaslikni hal qilish uchun ishlatiladi.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OrderRecord {
+    pub link: String,
+    #[serde(default)]
+    pub order_id: Option<String>,
+    pub service_id: u64,
+    pub quantity: u64,
+    #[serde(default)]
+    pub status: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_checked_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Alert,
   AppBar,
@@ -25,9 +25,10 @@ import {
   TextField,
   Toolbar,
   Tooltip,
-  Typography
+  Typography,
+  useMediaQuery
 } from '@mui/material';
-import { alpha } from '@mui/material/styles';
+import { alpha, useTheme } from '@mui/material/styles';
 import {
   CircleCheck,
   CircleOff,
@@ -43,6 +44,7 @@ import {
 } from 'lucide-react';
 import {
   AdResult,
+  ApiError,
   Dashboard,
   KeywordRule,
   Settings,
@@ -65,22 +67,24 @@ const emptySettings: Settings = {
 };
 
 function App() {
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('md'));
+
   const [token, setToken] = useState(() => localStorage.getItem('vipads_token'));
   const [loginUsername, setLoginUsername] = useState('Izzatillo');
   const [loginPassword, setLoginPassword] = useState('');
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [settings, setSettings] = useState<Settings>(emptySettings);
-  const [page, setPage] = useState<'panel' | 'logs'>('panel');
   const [tab, setTab] = useState(0);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [keywordInput, setKeywordInput] = useState('');
   const [keywordIntervalInput, setKeywordIntervalInput] = useState('5');
   const [keywordQuantityInput, setKeywordQuantityInput] = useState('100');
   const [keywordServiceIdInput, setKeywordServiceIdInput] = useState('875');
-  const [channelInput, setChannelInput] = useState('');
   const [blacklistInput, setBlacklistInput] = useState('');
   const [whitelistInput, setWhitelistInput] = useState('');
   const [tgApiId, setTgApiId] = useState('');
@@ -89,38 +93,77 @@ function App() {
   const [tgCode, setTgCode] = useState('');
   const [tgPassword, setTgPassword] = useState('');
 
+  // Foydalanuvchi sozlamalarni tahrirlaganini kuzatamiz. Poll (har interval'da)
+  // server nusxasini yuklab kelganda, agar tahrir saqlanmagan bo'lsa, uni
+  // bosib ketmasligi uchun shu bayroqdan foydalanamiz.
+  const dirtyRef = useRef(false);
+  const initializedRef = useRef(false);
+  // Har doim eng so'nggi sozlamalarni saqlaymiz, shunda avto-saqlashda eskirgan
+  // qiymat yuborilmaydi.
+  const settingsRef = useRef(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  const markDirty = useCallback(() => {
+    dirtyRef.current = true;
+  }, []);
+
+  const clearDirty = useCallback(() => {
+    dirtyRef.current = false;
+  }, []);
+
+  const handleAuthError = useCallback((err: unknown): boolean => {
+    if (err instanceof ApiError && err.status === 401) {
+      localStorage.removeItem('vipads_token');
+      setToken(null);
+      setDashboard(null);
+      initializedRef.current = false;
+      return true;
+    }
+    return false;
+  }, []);
+
   const refresh = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     try {
       const data = await apiFetch<Dashboard>('/dashboard', token);
       setDashboard(data);
-      setSettings(normalizeSettings(data.settings));
-      setTgApiId(data.telegram.api_id ? String(data.telegram.api_id) : '');
-      setTgPhone(data.telegram.phone ?? '');
+      // Saqlanmagan tahrir bo'lmasagina draft sozlamalarni serverdan yangilaymiz.
+      if (!dirtyRef.current) {
+        setSettings(normalizeSettings(data.settings));
+      }
+      // Telegram maydonlarini faqat bir marta (birinchi yuklashda) to'ldiramiz,
+      // aks holda Userbot tabida yozayotgan paytda poll uni bosib ketardi.
+      if (!initializedRef.current) {
+        setTgApiId(data.telegram.api_id ? String(data.telegram.api_id) : '');
+        setTgPhone(data.telegram.phone ?? '');
+        initializedRef.current = true;
+      }
       setError(null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Xatolik';
-      setError(message);
-      if (message.includes('Avtorizatsiya')) {
-        localStorage.removeItem('vipads_token');
-        setToken(null);
+      if (!handleAuthError(err)) {
+        setError(err instanceof Error ? err.message : 'Xatolik');
       }
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, handleAuthError]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
+  // Poll cadence serverdagi interval'ga bog'lanadi (draft maydonga emas), shuning
+  // uchun interval maydonini yozayotganda timer qayta-qayta yaralmaydi.
+  const serverInterval = dashboard?.settings.interval_seconds ?? 5;
   useEffect(() => {
     if (!token) return;
-    const seconds = Math.max(2, settings.interval_seconds || 5);
+    const seconds = Math.max(2, serverInterval || 5);
     const id = window.setInterval(refresh, seconds * 1000);
     return () => window.clearInterval(id);
-  }, [token, refresh, settings.interval_seconds]);
+  }, [token, refresh, serverInterval]);
 
   const saveToken = (value: string | null) => {
     if (value) {
@@ -139,6 +182,7 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ username: loginUsername, password: loginPassword })
       });
+      initializedRef.current = false;
       saveToken(data.token);
       setLoginPassword('');
       setNotice('Kirish muvaffaqiyatli');
@@ -149,44 +193,64 @@ function App() {
     }
   };
 
-  const persistSettings = async (nextSettings: Settings, successMessage: string) => {
-    setBusy(true);
-    setError(null);
+  const logout = async () => {
     try {
-      const clean = await apiFetch<Settings>('/settings', token, {
-        method: 'PUT',
-        body: JSON.stringify(nextSettings)
-      });
-      setSettings(normalizeSettings(clean));
-      setNotice(successMessage);
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Saqlash xato');
-    } finally {
-      setBusy(false);
+      await apiFetch('/auth/logout', token, { method: 'POST' });
+    } catch {
+      // chiqishda xatoni jim o'tkazib yuboramiz
     }
+    initializedRef.current = false;
+    setDashboard(null);
+    saveToken(null);
   };
 
-  const saveSettings = async () => {
-    await persistSettings(settings, 'Sozlamalar saqlandi');
-  };
+  const editSettings = useCallback(
+    (updater: Settings | ((current: Settings) => Settings)) => {
+      markDirty();
+      setSettings((prev) => (typeof updater === 'function' ? updater(prev) : updater));
+    },
+    [markDirty]
+  );
 
-  const setScannerEnabled = async (enabled: boolean) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const clean = await apiFetch<Settings>('/settings', token, {
-        method: 'PUT',
-        body: JSON.stringify({ ...settings, enabled })
-      });
-      setSettings(normalizeSettings(clean));
-      setNotice(enabled ? 'Skaner boshlandi' : 'Skaner to\'xtatildi');
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Skaner holatini o\'zgartirish xato');
-    } finally {
-      setBusy(false);
-    }
+  // Avto-saqlash: butun sozlamalar obyektini serverga yuboradi (PUT /settings butun
+  // obyektni oladi). Saqlash davomida dirty qoldiriladi, shunda poll draftni bosib
+  // ketmaydi; muvaffaqiyatda tozalanadi.
+  const commitSettings = useCallback(
+    async (next: Settings, successMessage?: string) => {
+      setError(null);
+      setSaving(true);
+      dirtyRef.current = true;
+      try {
+        await apiFetch<Settings>('/settings', token, {
+          method: 'PUT',
+          body: JSON.stringify(next)
+        });
+        clearDirty();
+        if (successMessage) setNotice(successMessage);
+      } catch (err) {
+        if (!handleAuthError(err)) {
+          setError(err instanceof Error ? err.message : 'Saqlash xato');
+        }
+      } finally {
+        setSaving(false);
+      }
+    },
+    [token, handleAuthError, clearDirty]
+  );
+
+  // Joriy (eng so'nggi) sozlamalarni saqlaydi — matn/raqam maydonlari fokusdan
+  // chiqqanda (onBlur) chaqiriladi.
+  const commitNow = useCallback(
+    (successMessage?: string) => {
+      void commitSettings(settingsRef.current, successMessage);
+    },
+    [commitSettings]
+  );
+
+  const setScannerEnabled = (enabled: boolean) => {
+    const next = { ...settingsRef.current, enabled };
+    setSettings(next);
+    void commitSettings(next, enabled ? 'Skaner boshlandi' : "Skaner to'xtatildi");
   };
 
   const syncKeywordSettings = (rules: KeywordRule[]) => ({
@@ -196,18 +260,19 @@ function App() {
       .map((rule) => rule.text.trim())
   });
 
-  const addKeywordRules = async () => {
+  const addKeywordRules = () => {
     const items = keywordInput
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean);
     if (!items.length) return;
 
+    const base = settingsRef.current;
     const interval = clampNumber(Number(keywordIntervalInput), 2, 86400, 5);
-    const quantity = clampNumber(Number(keywordQuantityInput), 1, 1000000, settings.order_quantity || 100);
+    const quantity = clampNumber(Number(keywordQuantityInput), 1, 1000000, base.order_quantity || 100);
     const serviceId = clampNumber(Number(keywordServiceIdInput), 1, 10000000, 875);
-    const existing = new Set(settings.keyword_rules.map((rule) => rule.text.toLowerCase()));
-    const nextRules = [...settings.keyword_rules];
+    const existing = new Set(base.keyword_rules.map((rule) => rule.text.toLowerCase()));
+    const nextRules = [...base.keyword_rules];
 
     for (const item of items) {
       if (!existing.has(item.toLowerCase())) {
@@ -224,18 +289,16 @@ function App() {
       }
     }
 
-    const nextSettings = {
-      ...settings,
-      ...syncKeywordSettings(nextRules)
-    };
-
-    setSettings(nextSettings);
+    const next = { ...base, ...syncKeywordSettings(nextRules) };
+    setSettings(next);
     setKeywordInput('');
-    await persistSettings(nextSettings, 'Key qo\'shildi va saqlandi');
+    void commitSettings(next, "Key qo'shildi");
   };
 
+  // Matn/raqam maydonlari: faqat draftni yangilaydi (markDirty). Saqlash onBlur
+  // (fokusdan chiqqanda) commitNow orqali sodir bo'ladi.
   const updateKeywordRule = (index: number, patch: Partial<KeywordRule>) => {
-    setSettings((current) => {
+    editSettings((current) => {
       const nextRules = current.keyword_rules.map((rule, ruleIndex) =>
         ruleIndex === index
           ? {
@@ -256,46 +319,46 @@ function App() {
     });
   };
 
-  const removeKeywordRule = (index: number) => {
-    setSettings((current) => {
-      const nextRules = current.keyword_rules.filter((_, ruleIndex) => ruleIndex !== index);
-      return {
-        ...current,
-        ...syncKeywordSettings(nextRules)
-      };
-    });
+  // Switch (yoqish/o'chirish) — darhol saqlanadi.
+  const setRuleEnabled = (index: number, enabled: boolean) => {
+    const nextRules = settingsRef.current.keyword_rules.map((rule, ruleIndex) =>
+      ruleIndex === index ? { ...rule, enabled } : rule
+    );
+    const next = { ...settingsRef.current, ...syncKeywordSettings(nextRules) };
+    setSettings(next);
+    void commitSettings(next);
   };
 
-  const addListItem = async (
-    field: 'channels' | 'blacklist_channels' | 'whitelist_channels',
-    value: string
-  ) => {
+  const removeKeywordRule = (index: number) => {
+    const nextRules = settingsRef.current.keyword_rules.filter((_, ruleIndex) => ruleIndex !== index);
+    const next = { ...settingsRef.current, ...syncKeywordSettings(nextRules) };
+    setSettings(next);
+    void commitSettings(next, "Key o'chirildi");
+  };
+
+  const addListItem = (field: 'blacklist_channels' | 'whitelist_channels', value: string) => {
     const items = value
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean);
     if (!items.length) return;
-    const nextSettings = {
-      ...settings,
-      [field]: Array.from(new Set([...settings[field], ...items]))
+    const next = {
+      ...settingsRef.current,
+      [field]: Array.from(new Set([...settingsRef.current[field], ...items]))
     };
-    setSettings(nextSettings);
-    if (field === 'channels') setChannelInput('');
+    setSettings(next);
     if (field === 'blacklist_channels') setBlacklistInput('');
     if (field === 'whitelist_channels') setWhitelistInput('');
-    await persistSettings(nextSettings, 'Ro\'yxat saqlandi');
+    void commitSettings(next, "Ro'yxat saqlandi");
   };
 
-  const removeListItem = async (
-    field: 'channels' | 'blacklist_channels' | 'whitelist_channels',
-    value: string
-  ) => {
-    const nextSettings = {
-      ...settings,
-      [field]: settings[field].filter((item) => item !== value)
+  const removeListItem = (field: 'blacklist_channels' | 'whitelist_channels', value: string) => {
+    const next = {
+      ...settingsRef.current,
+      [field]: settingsRef.current[field].filter((item) => item !== value)
     };
-    setSettings(nextSettings);
-    await persistSettings(nextSettings, 'Ro\'yxat saqlandi');
+    setSettings(next);
+    void commitSettings(next, "Ro'yxat saqlandi");
   };
 
   const requestCode = async () => {
@@ -313,7 +376,9 @@ function App() {
       setNotice(data.message);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Telegram login xato');
+      if (!handleAuthError(err)) {
+        setError(err instanceof Error ? err.message : 'Telegram login xato');
+      }
     } finally {
       setBusy(false);
     }
@@ -338,7 +403,9 @@ function App() {
       }
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Tasdiqlash xato');
+      if (!handleAuthError(err)) {
+        setError(err instanceof Error ? err.message : 'Tasdiqlash xato');
+      }
     } finally {
       setBusy(false);
     }
@@ -352,7 +419,9 @@ function App() {
       setNotice('Userbot uzildi');
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Uzish xato');
+      if (!handleAuthError(err)) {
+        setError(err instanceof Error ? err.message : 'Uzish xato');
+      }
     } finally {
       setBusy(false);
     }
@@ -368,7 +437,9 @@ function App() {
       setNotice(data.message);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Scan xato');
+      if (!handleAuthError(err)) {
+        setError(err instanceof Error ? err.message : 'Scan xato');
+      }
     } finally {
       setBusy(false);
     }
@@ -382,7 +453,9 @@ function App() {
       setNotice('Natijalar tozalandi');
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Tozalash xato');
+      if (!handleAuthError(err)) {
+        setError(err instanceof Error ? err.message : 'Tozalash xato');
+      }
     } finally {
       setBusy(false);
     }
@@ -396,7 +469,9 @@ function App() {
       setNotice('Loglar tozalandi');
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Log tozalash xato');
+      if (!handleAuthError(err)) {
+        setError(err instanceof Error ? err.message : 'Log tozalash xato');
+      }
     } finally {
       setBusy(false);
     }
@@ -404,11 +479,18 @@ function App() {
 
   if (!token) {
     return (
-      <Box className="panel-shell" sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center', p: 2 }}>
-        <Paper sx={{ width: '100%', maxWidth: 420, p: { xs: 2.5, sm: 4 }, borderTop: '4px solid #FFC107' }}>
+      <Box
+        className="panel-shell"
+        sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center', p: 2 }}
+      >
+        <Paper
+          sx={{ width: '100%', maxWidth: 420, p: { xs: 2.5, sm: 4 }, borderTop: '4px solid #FFC107' }}
+        >
           <Stack spacing={2.5}>
             <Box>
-              <Typography variant="h4" color="primary">VIP Ads</Typography>
+              <Typography variant="h4" color="primary">
+                VIP Ads
+              </Typography>
               <Typography color="text.secondary">Admin panel</Typography>
             </Box>
             {error && <Alert severity="error">{error}</Alert>}
@@ -433,6 +515,7 @@ function App() {
               color="primary"
               onClick={handleLogin}
               disabled={busy}
+              size="large"
               startIcon={busy ? <CircularProgress size={16} color="inherit" /> : <KeyRound size={18} />}
             >
               Kirish
@@ -443,171 +526,164 @@ function App() {
     );
   }
 
+  const connected = Boolean(dashboard?.status.telegram_connected);
+  const scannerOn = Boolean(dashboard?.settings.enabled);
+
   return (
-    <Box className="panel-shell">
-      <AppBar position="static" elevation={0} className="top-band">
-        <Toolbar sx={{ gap: 2, flexWrap: 'wrap', py: 1 }}>
-          <Box sx={{ flex: 1, minWidth: 220 }}>
-            <Typography variant="h5">VIP Ads</Typography>
-            <Typography variant="body2" sx={{ opacity: 0.8 }}>izzatillo-aka.vipads.uz</Typography>
+    <Box className="panel-shell" sx={{ pb: 4 }}>
+      <AppBar position="sticky" elevation={0} className="top-band">
+        <Toolbar sx={{ gap: 1, py: 1, minHeight: { xs: 56, sm: 64 } }}>
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="h6" sx={{ lineHeight: 1.1 }}>
+              VIP Ads
+            </Typography>
+            <Typography variant="caption" sx={{ opacity: 0.8 }} noWrap>
+              izzatillo-aka.vipads.uz
+            </Typography>
           </Box>
+          <Tooltip title="Yangilash">
+            <span>
+              <IconButton color="inherit" onClick={refresh} disabled={loading}>
+                <RefreshCw size={20} />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title="Chiqish">
+            <IconButton color="inherit" onClick={logout}>
+              <LogOut size={20} />
+            </IconButton>
+          </Tooltip>
+        </Toolbar>
+        <Box sx={{ px: 1.5, pb: 1.25, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          <StatusChip ok={connected} label={connected ? 'Userbot ulangan' : 'Userbot ulanmagan'} />
           <StatusChip
-            ok={Boolean(dashboard?.status.telegram_connected)}
-            label={dashboard?.status.telegram_connected ? 'Userbot ulangan' : 'Userbot ulanmagan'}
-          />
-          <StatusChip
-            ok={Boolean(settings.enabled)}
-            label={settings.enabled ? `Skaner yoqilgan: har ${settings.interval_seconds}s` : 'Skaner to\'xtagan'}
+            ok={scannerOn}
+            label={
+              scannerOn
+                ? `Skaner: har ${dashboard?.settings.interval_seconds ?? settings.interval_seconds}s`
+                : "Skaner to'xtagan"
+            }
           />
           <StatusChip
             ok={!dashboard?.smm_balance.error && Boolean(dashboard?.smm_balance.configured)}
             label={`Balans: ${formatBalance(dashboard?.smm_balance)}`}
           />
-          <Button
-            color="inherit"
-            variant="contained"
-            onClick={() => setScannerEnabled(true)}
-            disabled={busy || settings.enabled}
-            startIcon={<Play size={18} />}
-            sx={{ bgcolor: 'rgba(255,255,255,0.18)', '&:hover': { bgcolor: 'rgba(255,255,255,0.26)' } }}
-          >
-            Boshlash
-          </Button>
-          <Button
-            color="inherit"
-            variant="outlined"
-            onClick={() => setScannerEnabled(false)}
-            disabled={busy || !settings.enabled}
-            startIcon={<CircleOff size={18} />}
-            sx={{ borderColor: 'rgba(255,255,255,0.5)' }}
-          >
-            To'xtatish
-          </Button>
-          <Button
-            color="inherit"
-            variant={page === 'panel' ? 'outlined' : 'text'}
-            onClick={() => setPage('panel')}
-            sx={{ borderColor: 'rgba(255,255,255,0.5)' }}
-          >
-            Panel
-          </Button>
-          <Button
-            color="inherit"
-            variant={page === 'logs' ? 'outlined' : 'text'}
-            onClick={() => setPage('logs')}
-            sx={{ borderColor: 'rgba(255,255,255,0.5)' }}
-          >
-            Loglar ({dashboard?.status.total_logs ?? 0})
-          </Button>
-          <Tooltip title="Yangilash">
-            <IconButton color="inherit" onClick={refresh} disabled={loading}>
-              <RefreshCw size={20} />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Chiqish">
-            <IconButton color="inherit" onClick={() => saveToken(null)}>
-              <LogOut size={20} />
-            </IconButton>
-          </Tooltip>
-        </Toolbar>
+        </Box>
       </AppBar>
 
-      <Container maxWidth="xl" sx={{ py: 3 }}>
-        <Stack spacing={2.5}>
+      <Container maxWidth="xl" sx={{ py: { xs: 2, md: 3 }, px: { xs: 1.5, sm: 2, md: 3 } }}>
+        <Stack spacing={2}>
           {(error || notice || dashboard?.status.last_error) && (
             <Stack spacing={1}>
-              {error && <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>}
+              {error && (
+                <Alert severity="error" onClose={() => setError(null)}>
+                  {error}
+                </Alert>
+              )}
               {dashboard?.status.last_error && (
                 <Alert severity="warning">{dashboard.status.last_error}</Alert>
               )}
-              {notice && <Alert severity="success" onClose={() => setNotice(null)}>{notice}</Alert>}
+              {notice && (
+                <Alert severity="success" onClose={() => setNotice(null)}>
+                  {notice}
+                </Alert>
+              )}
             </Stack>
           )}
 
+          <ScannerControl
+            scannerOn={scannerOn}
+            scanning={Boolean(dashboard?.status.scanning)}
+            busy={busy}
+            onStart={() => setScannerEnabled(true)}
+            onStop={() => setScannerEnabled(false)}
+            onRunNow={runScan}
+          />
+
           <StatsBar dashboard={dashboard} loading={loading} />
 
-          {page === 'logs' ? (
-            <LogsPanel
-              logs={dashboard?.logs ?? []}
-              clearLogs={clearLogs}
-              busy={busy}
-            />
-          ) : (
-            <Paper sx={{ overflow: 'hidden' }}>
-              <Tabs
-                value={tab}
-                onChange={(_, value) => setTab(value)}
-                variant="scrollable"
-                scrollButtons="auto"
-                sx={{
-                  borderBottom: 1,
-                  borderColor: 'divider',
-                  '& .MuiTab-root': { minHeight: 52, fontWeight: 800 }
-                }}
-              >
-                <Tab label="Sozlamalar" />
-                <Tab label="Userbot" />
-                <Tab label="Natijalar" />
-              </Tabs>
+          <Paper sx={{ overflow: 'hidden' }}>
+            <Tabs
+              value={tab}
+              onChange={(_, value) => setTab(value)}
+              variant="scrollable"
+              scrollButtons="auto"
+              allowScrollButtonsMobile
+              sx={{
+                borderBottom: 1,
+                borderColor: 'divider',
+                '& .MuiTab-root': { minHeight: 52, fontWeight: 800 }
+              }}
+            >
+              <Tab label="Sozlamalar" />
+              <Tab label="Userbot" />
+              <Tab label="Natijalar" />
+              <Tab label={`Loglar (${dashboard?.status.total_logs ?? 0})`} />
+            </Tabs>
 
-              <Box sx={{ p: { xs: 2, md: 3 } }}>
-                {tab === 0 && (
-                  <SettingsPanel
-                    settings={settings}
-                    setSettings={setSettings}
-                    keywordInput={keywordInput}
-                    setKeywordInput={setKeywordInput}
-                    keywordIntervalInput={keywordIntervalInput}
-                    setKeywordIntervalInput={setKeywordIntervalInput}
-                    keywordQuantityInput={keywordQuantityInput}
-                    setKeywordQuantityInput={setKeywordQuantityInput}
-                    keywordServiceIdInput={keywordServiceIdInput}
-                    setKeywordServiceIdInput={setKeywordServiceIdInput}
-                    channelInput={channelInput}
-                    setChannelInput={setChannelInput}
-                    blacklistInput={blacklistInput}
-                    setBlacklistInput={setBlacklistInput}
-                    whitelistInput={whitelistInput}
-                    setWhitelistInput={setWhitelistInput}
-                    addKeywordRules={addKeywordRules}
-                    updateKeywordRule={updateKeywordRule}
-                    removeKeywordRule={removeKeywordRule}
-                    addListItem={addListItem}
-                    removeListItem={removeListItem}
-                    saveSettings={saveSettings}
-                    busy={busy}
-                  />
-                )}
-                {tab === 1 && (
-                  <TelegramPanel
-                    dashboard={dashboard}
-                    tgApiId={tgApiId}
-                    setTgApiId={setTgApiId}
-                    tgApiHash={tgApiHash}
-                    setTgApiHash={setTgApiHash}
-                    tgPhone={tgPhone}
-                    setTgPhone={setTgPhone}
-                    tgCode={tgCode}
-                    setTgCode={setTgCode}
-                    tgPassword={tgPassword}
-                    setTgPassword={setTgPassword}
-                    requestCode={requestCode}
-                    verifyTelegram={verifyTelegram}
-                    disconnectTelegram={disconnectTelegram}
-                    busy={busy}
-                  />
-                )}
-                {tab === 2 && (
-                  <ResultsPanel
-                    results={dashboard?.results ?? []}
-                    runScan={runScan}
-                    clearResults={clearResults}
-                    busy={busy}
-                  />
-                )}
-              </Box>
-            </Paper>
-          )}
+            <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 } }}>
+              {tab === 0 && (
+                <SettingsPanel
+                  settings={settings}
+                  setSettings={editSettings}
+                  saving={saving}
+                  isMobile={isMobile}
+                  setScannerEnabled={setScannerEnabled}
+                  commitNow={commitNow}
+                  keywordInput={keywordInput}
+                  setKeywordInput={setKeywordInput}
+                  keywordIntervalInput={keywordIntervalInput}
+                  setKeywordIntervalInput={setKeywordIntervalInput}
+                  keywordQuantityInput={keywordQuantityInput}
+                  setKeywordQuantityInput={setKeywordQuantityInput}
+                  keywordServiceIdInput={keywordServiceIdInput}
+                  setKeywordServiceIdInput={setKeywordServiceIdInput}
+                  blacklistInput={blacklistInput}
+                  setBlacklistInput={setBlacklistInput}
+                  whitelistInput={whitelistInput}
+                  setWhitelistInput={setWhitelistInput}
+                  addKeywordRules={addKeywordRules}
+                  updateKeywordRule={updateKeywordRule}
+                  setRuleEnabled={setRuleEnabled}
+                  removeKeywordRule={removeKeywordRule}
+                  addListItem={addListItem}
+                  removeListItem={removeListItem}
+                  busy={busy}
+                />
+              )}
+              {tab === 1 && (
+                <TelegramPanel
+                  dashboard={dashboard}
+                  tgApiId={tgApiId}
+                  setTgApiId={setTgApiId}
+                  tgApiHash={tgApiHash}
+                  setTgApiHash={setTgApiHash}
+                  tgPhone={tgPhone}
+                  setTgPhone={setTgPhone}
+                  tgCode={tgCode}
+                  setTgCode={setTgCode}
+                  tgPassword={tgPassword}
+                  setTgPassword={setTgPassword}
+                  requestCode={requestCode}
+                  verifyTelegram={verifyTelegram}
+                  disconnectTelegram={disconnectTelegram}
+                  busy={busy}
+                />
+              )}
+              {tab === 2 && (
+                <ResultsPanel
+                  results={dashboard?.results ?? []}
+                  runScan={runScan}
+                  clearResults={clearResults}
+                  busy={busy}
+                  isMobile={isMobile}
+                />
+              )}
+              {tab === 3 && (
+                <LogsPanel logs={dashboard?.logs ?? []} clearLogs={clearLogs} busy={busy} isMobile={isMobile} />
+              )}
+            </Box>
+          </Paper>
         </Stack>
       </Container>
     </Box>
@@ -617,7 +693,8 @@ function App() {
 function StatusChip({ ok, label }: { ok: boolean; label: string }) {
   return (
     <Chip
-      icon={ok ? <CircleCheck size={16} /> : <CircleOff size={16} />}
+      size="small"
+      icon={ok ? <CircleCheck size={15} /> : <CircleOff size={15} />}
       label={label}
       color={ok ? 'secondary' : 'default'}
       sx={{ fontWeight: 800, maxWidth: '100%' }}
@@ -625,31 +702,108 @@ function StatusChip({ ok, label }: { ok: boolean; label: string }) {
   );
 }
 
+function ScannerControl({
+  scannerOn,
+  scanning,
+  busy,
+  onStart,
+  onStop,
+  onRunNow
+}: {
+  scannerOn: boolean;
+  scanning: boolean;
+  busy: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onRunNow: () => void;
+}) {
+  return (
+    <Paper sx={{ p: { xs: 1.5, md: 2 }, borderLeft: '4px solid', borderColor: scannerOn ? 'secondary.main' : 'divider' }}>
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        spacing={1.5}
+        sx={{ alignItems: { xs: 'stretch', sm: 'center' }, justifyContent: 'space-between' }}
+      >
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+          <Chip
+            color={scannerOn ? 'secondary' : 'default'}
+            label={scannerOn ? (scanning ? 'Tekshiryapti' : 'Yoqilgan') : "To'xtagan"}
+            icon={scannerOn ? <CircleCheck size={16} /> : <CircleOff size={16} />}
+            sx={{ fontWeight: 800 }}
+          />
+          {scanning && <CircularProgress size={18} />}
+        </Stack>
+        <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', justifyContent: { xs: 'stretch', sm: 'flex-end' } }}>
+          <Button
+            variant="contained"
+            color="primary"
+            onClick={onStart}
+            disabled={busy || scannerOn}
+            startIcon={<Play size={18} />}
+            sx={{ flex: { xs: 1, sm: 'initial' } }}
+          >
+            Boshlash
+          </Button>
+          <Button
+            variant="outlined"
+            color="primary"
+            onClick={onStop}
+            disabled={busy || !scannerOn}
+            startIcon={<CircleOff size={18} />}
+            sx={{ flex: { xs: 1, sm: 'initial' } }}
+          >
+            To'xtatish
+          </Button>
+          <Button
+            variant="contained"
+            color="secondary"
+            onClick={onRunNow}
+            disabled={busy}
+            startIcon={<RefreshCw size={18} />}
+            sx={{ flex: { xs: 1, sm: 'initial' } }}
+          >
+            Hozir tekshirish
+          </Button>
+        </Stack>
+      </Stack>
+    </Paper>
+  );
+}
+
 function StatsBar({ dashboard, loading }: { dashboard: Dashboard | null; loading: boolean }) {
   const status = dashboard?.status;
-  const items = [
+  const items: [string, string][] = [
     ['API balans', formatBalance(dashboard?.smm_balance)],
     ['Natijalar', String(status?.total_results ?? 0)],
     ['Loglar', String(status?.total_logs ?? 0)],
     ['Oxirgi scan', formatDate(status?.last_run_at)],
     ['Keyingi scan', formatDate(status?.next_run_at)],
-    ['Holat', !dashboard?.settings.enabled ? 'To\'xtagan' : status?.scanning ? 'Tekshiryapti' : loading ? 'Yuklanmoqda' : 'Yoqilgan']
+    [
+      'Holat',
+      !dashboard?.settings.enabled
+        ? "To'xtagan"
+        : status?.scanning
+          ? 'Tekshiryapti'
+          : loading
+            ? 'Yuklanmoqda'
+            : 'Yoqilgan'
+    ]
   ];
 
   return (
     <Box
       sx={{
         display: 'grid',
-        gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(6, 1fr)' },
-        gap: 1.5
+        gridTemplateColumns: { xs: '1fr 1fr', sm: 'repeat(3, 1fr)', lg: 'repeat(6, 1fr)' },
+        gap: { xs: 1, md: 1.5 }
       }}
     >
       {items.map(([label, value]) => (
-        <Paper key={label} sx={{ p: 2, borderLeft: '4px solid #FFC107' }}>
+        <Paper key={label} sx={{ p: { xs: 1.25, md: 2 }, borderLeft: '4px solid #FFC107' }}>
           <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>
             {label}
           </Typography>
-          <Typography variant="h6" className="text-clamp">
+          <Typography variant="h6" className="text-clamp" sx={{ fontSize: { xs: '1rem', md: '1.25rem' } }}>
             {value}
           </Typography>
         </Paper>
@@ -661,6 +815,10 @@ function StatsBar({ dashboard, loading }: { dashboard: Dashboard | null; loading
 type SettingsPanelProps = {
   settings: Settings;
   setSettings: (settings: Settings | ((current: Settings) => Settings)) => void;
+  saving: boolean;
+  isMobile: boolean;
+  setScannerEnabled: (enabled: boolean) => void;
+  commitNow: (successMessage?: string) => void;
   keywordInput: string;
   setKeywordInput: (value: string) => void;
   keywordIntervalInput: string;
@@ -669,24 +827,16 @@ type SettingsPanelProps = {
   setKeywordQuantityInput: (value: string) => void;
   keywordServiceIdInput: string;
   setKeywordServiceIdInput: (value: string) => void;
-  channelInput: string;
-  setChannelInput: (value: string) => void;
   blacklistInput: string;
   setBlacklistInput: (value: string) => void;
   whitelistInput: string;
   setWhitelistInput: (value: string) => void;
   addKeywordRules: () => void;
   updateKeywordRule: (index: number, patch: Partial<KeywordRule>) => void;
+  setRuleEnabled: (index: number, enabled: boolean) => void;
   removeKeywordRule: (index: number) => void;
-  addListItem: (
-    field: 'channels' | 'blacklist_channels' | 'whitelist_channels',
-    value: string
-  ) => void;
-  removeListItem: (
-    field: 'channels' | 'blacklist_channels' | 'whitelist_channels',
-    value: string
-  ) => void;
-  saveSettings: () => void;
+  addListItem: (field: 'blacklist_channels' | 'whitelist_channels', value: string) => void;
+  removeListItem: (field: 'blacklist_channels' | 'whitelist_channels', value: string) => void;
   busy: boolean;
 };
 
@@ -694,6 +844,10 @@ function SettingsPanel(props: SettingsPanelProps) {
   const {
     settings,
     setSettings,
+    saving,
+    isMobile,
+    setScannerEnabled,
+    commitNow,
     keywordInput,
     setKeywordInput,
     keywordIntervalInput,
@@ -702,33 +856,38 @@ function SettingsPanel(props: SettingsPanelProps) {
     setKeywordQuantityInput,
     keywordServiceIdInput,
     setKeywordServiceIdInput,
-    channelInput,
-    setChannelInput,
     blacklistInput,
     setBlacklistInput,
     whitelistInput,
     setWhitelistInput,
     addKeywordRules,
     updateKeywordRule,
+    setRuleEnabled,
     removeKeywordRule,
     addListItem,
-    removeListItem,
-    saveSettings,
-    busy
+    removeListItem
   } = props;
 
   return (
     <Stack spacing={3}>
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+        <Save size={16} />
+        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
+          O'zgarishlar avtomatik saqlanadi
+        </Typography>
+        {saving && <CircularProgress size={14} />}
+      </Stack>
+
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '220px 1fr 1fr' }, gap: 2 }}>
-        <Paper variant="outlined" sx={{ p: 2 }}>
+        <Paper variant="outlined" sx={{ p: 2, display: 'flex', alignItems: 'center' }}>
           <FormControlLabel
             control={
               <Switch
                 checked={settings.enabled}
-                onChange={(event) => setSettings((current) => ({ ...current, enabled: event.target.checked }))}
+                onChange={(event) => setScannerEnabled(event.target.checked)}
               />
             }
-            label={settings.enabled ? 'Avto skaner yoqilgan' : 'Avto skaner to\'xtagan'}
+            label={settings.enabled ? 'Avto skaner yoqilgan' : "Avto skaner to'xtagan"}
           />
         </Paper>
         <TextField
@@ -738,6 +897,7 @@ function SettingsPanel(props: SettingsPanelProps) {
           onChange={(event) =>
             setSettings((current) => ({ ...current, interval_seconds: Number(event.target.value) }))
           }
+          onBlur={() => commitNow()}
           slotProps={{ htmlInput: { min: 2, max: 3600 } }}
           fullWidth
         />
@@ -748,6 +908,7 @@ function SettingsPanel(props: SettingsPanelProps) {
           onChange={(event) =>
             setSettings((current) => ({ ...current, max_results: Number(event.target.value) }))
           }
+          onBlur={() => commitNow()}
           slotProps={{ htmlInput: { min: 50, max: 5000 } }}
           fullWidth
         />
@@ -755,6 +916,7 @@ function SettingsPanel(props: SettingsPanelProps) {
 
       <KeywordRulesEditor
         rules={settings.keyword_rules}
+        isMobile={isMobile}
         keywordInput={keywordInput}
         setKeywordInput={setKeywordInput}
         intervalInput={keywordIntervalInput}
@@ -765,22 +927,14 @@ function SettingsPanel(props: SettingsPanelProps) {
         setServiceIdInput={setKeywordServiceIdInput}
         onAdd={addKeywordRules}
         onUpdate={updateKeywordRule}
+        onCommit={commitNow}
+        onToggle={setRuleEnabled}
         onRemove={removeKeywordRule}
-      />
-
-      <ListEditor
-        title="Tekshiriladigan kanallar"
-        placeholder="@kanal yoki t.me/kanal"
-        value={channelInput}
-        onChange={setChannelInput}
-        items={settings.channels}
-        onAdd={() => addListItem('channels', channelInput)}
-        onRemove={(item) => removeListItem('channels', item)}
       />
 
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 2 }}>
         <ListEditor
-          title="2-list: qora ro'yxat"
+          title="Qora ro'yxat (order shu kanallarga)"
           placeholder="@kanal yoki t.me/kanal"
           value={blacklistInput}
           onChange={setBlacklistInput}
@@ -790,7 +944,7 @@ function SettingsPanel(props: SettingsPanelProps) {
         />
 
         <ListEditor
-          title="3-list: oq ro'yxat"
+          title="Oq ro'yxat (order yo'q)"
           placeholder="@kanal yoki t.me/kanal"
           value={whitelistInput}
           onChange={setWhitelistInput}
@@ -799,18 +953,13 @@ function SettingsPanel(props: SettingsPanelProps) {
           onRemove={(item) => removeListItem('whitelist_channels', item)}
         />
       </Box>
-
-      <Box>
-        <Button variant="contained" onClick={saveSettings} disabled={busy} startIcon={<Save size={18} />}>
-          Saqlash
-        </Button>
-      </Box>
     </Stack>
   );
 }
 
 function KeywordRulesEditor({
   rules,
+  isMobile,
   keywordInput,
   setKeywordInput,
   intervalInput,
@@ -821,9 +970,12 @@ function KeywordRulesEditor({
   setServiceIdInput,
   onAdd,
   onUpdate,
+  onCommit,
+  onToggle,
   onRemove
 }: {
   rules: KeywordRule[];
+  isMobile: boolean;
   keywordInput: string;
   setKeywordInput: (value: string) => void;
   intervalInput: string;
@@ -834,6 +986,8 @@ function KeywordRulesEditor({
   setServiceIdInput: (value: string) => void;
   onAdd: () => void;
   onUpdate: (index: number, patch: Partial<KeywordRule>) => void;
+  onCommit: () => void;
+  onToggle: (index: number, enabled: boolean) => void;
   onRemove: (index: number) => void;
 }) {
   return (
@@ -842,7 +996,7 @@ function KeywordRulesEditor({
       <Box
         sx={{
           display: 'grid',
-          gridTemplateColumns: { xs: '1fr', md: '1.5fr 130px 130px 130px auto' },
+          gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr', md: '1.5fr 130px 130px 130px auto' },
           gap: 1
         }}
       >
@@ -853,6 +1007,7 @@ function KeywordRulesEditor({
             if (event.key === 'Enter') onAdd();
           }}
           placeholder="masalan: avto, kredit"
+          label="Key (link)"
           fullWidth
         />
         <TextField
@@ -896,100 +1051,193 @@ function KeywordRulesEditor({
         </Button>
       </Box>
 
-      <Box sx={{ overflowX: 'auto' }}>
-        <Table size="small" sx={{ minWidth: 980 }}>
-          <TableHead>
-            <TableRow>
-              <TableCell sx={{ width: 88 }}>Holat</TableCell>
-              <TableCell>Key</TableCell>
-              <TableCell sx={{ width: 150 }}>Kutish</TableCell>
-              <TableCell sx={{ width: 130 }}>Quality</TableCell>
-              <TableCell sx={{ width: 130 }}>SMM ID</TableCell>
-              <TableCell sx={{ width: 160 }}>Oxirgi</TableCell>
-              <TableCell sx={{ width: 160 }}>Keyingi</TableCell>
-              <TableCell align="right" sx={{ width: 72 }} />
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {rules.map((rule, index) => (
-              <TableRow key={`${rule.text}-${index}`} hover>
-                <TableCell>
-                  <Switch
-                    checked={rule.enabled}
-                    onChange={(event) => onUpdate(index, { enabled: event.target.checked })}
-                  />
-                </TableCell>
-                <TableCell>
-                  <TextField
-                    value={rule.text}
-                    onChange={(event) => onUpdate(index, { text: event.target.value })}
-                    size="small"
-                    fullWidth
-                  />
-                </TableCell>
-                <TableCell>
-                  <TextField
-                    value={rule.interval_seconds}
-                    onChange={(event) => onUpdate(index, { interval_seconds: Number(event.target.value) })}
-                    type="number"
-                    size="small"
-                    slotProps={{
-                      htmlInput: { min: 2, max: 86400 },
-                      input: { endAdornment: <InputAdornment position="end">s</InputAdornment> }
-                    }}
-                    fullWidth
-                  />
-                </TableCell>
-                <TableCell>
-                  <TextField
-                    value={rule.order_quantity}
-                    onChange={(event) => onUpdate(index, { order_quantity: Number(event.target.value) })}
-                    type="number"
-                    size="small"
-                    slotProps={{ htmlInput: { min: 1, max: 1000000 } }}
-                    fullWidth
-                  />
-                </TableCell>
-                <TableCell>
-                  <TextField
-                    value={rule.service_id}
-                    onChange={(event) => onUpdate(index, { service_id: Number(event.target.value) })}
-                    type="number"
-                    size="small"
-                    slotProps={{ htmlInput: { min: 1 } }}
-                    fullWidth
-                  />
-                </TableCell>
-                <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(rule.last_checked_at)}</TableCell>
-                <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(rule.next_check_at)}</TableCell>
-                <TableCell align="right">
-                  <Tooltip title="O'chirish">
-                    <IconButton color="error" onClick={() => onRemove(index)}>
-                      <Trash2 size={18} />
-                    </IconButton>
-                  </Tooltip>
-                </TableCell>
-              </TableRow>
-            ))}
-            {!rules.length && (
+      {isMobile ? (
+        <Stack spacing={1.25}>
+          {rules.map((rule, index) => (
+            <RuleCard
+              key={`${rule.text}-${index}`}
+              rule={rule}
+              index={index}
+              onUpdate={onUpdate}
+              onCommit={onCommit}
+              onToggle={onToggle}
+              onRemove={onRemove}
+            />
+          ))}
+          {!rules.length && <EmptyHint text="Bo'sh" />}
+        </Stack>
+      ) : (
+        <Box sx={{ overflowX: 'auto' }}>
+          <Table size="small" sx={{ minWidth: 980 }}>
+            <TableHead>
               <TableRow>
-                <TableCell colSpan={8}>
-                  <Box
-                    sx={{
-                      p: 3,
-                      textAlign: 'center',
-                      bgcolor: (theme) => alpha(theme.palette.primary.main, 0.04)
-                    }}
-                  >
-                    <Typography color="text.secondary">Bo'sh</Typography>
-                  </Box>
-                </TableCell>
+                <TableCell sx={{ width: 88 }}>Holat</TableCell>
+                <TableCell>Key</TableCell>
+                <TableCell sx={{ width: 150 }}>Kutish</TableCell>
+                <TableCell sx={{ width: 130 }}>Quality</TableCell>
+                <TableCell sx={{ width: 130 }}>SMM ID</TableCell>
+                <TableCell sx={{ width: 160 }}>Oxirgi</TableCell>
+                <TableCell sx={{ width: 160 }}>Keyingi</TableCell>
+                <TableCell align="right" sx={{ width: 72 }} />
               </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </Box>
+            </TableHead>
+            <TableBody>
+              {rules.map((rule, index) => (
+                <TableRow key={`${rule.text}-${index}`} hover>
+                  <TableCell>
+                    <Switch
+                      checked={rule.enabled}
+                      onChange={(event) => onToggle(index, event.target.checked)}
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <TextField
+                      value={rule.text}
+                      onChange={(event) => onUpdate(index, { text: event.target.value })}
+                      onBlur={() => onCommit()}
+                      size="small"
+                      fullWidth
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <TextField
+                      value={rule.interval_seconds}
+                      onChange={(event) => onUpdate(index, { interval_seconds: Number(event.target.value) })}
+                      onBlur={() => onCommit()}
+                      type="number"
+                      size="small"
+                      slotProps={{
+                        htmlInput: { min: 2, max: 86400 },
+                        input: { endAdornment: <InputAdornment position="end">s</InputAdornment> }
+                      }}
+                      fullWidth
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <TextField
+                      value={rule.order_quantity}
+                      onChange={(event) => onUpdate(index, { order_quantity: Number(event.target.value) })}
+                      onBlur={() => onCommit()}
+                      type="number"
+                      size="small"
+                      slotProps={{ htmlInput: { min: 1, max: 1000000 } }}
+                      fullWidth
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <TextField
+                      value={rule.service_id}
+                      onChange={(event) => onUpdate(index, { service_id: Number(event.target.value) })}
+                      onBlur={() => onCommit()}
+                      type="number"
+                      size="small"
+                      slotProps={{ htmlInput: { min: 1 } }}
+                      fullWidth
+                    />
+                  </TableCell>
+                  <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(rule.last_checked_at)}</TableCell>
+                  <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(rule.next_check_at)}</TableCell>
+                  <TableCell align="right">
+                    <Tooltip title="O'chirish">
+                      <IconButton color="error" onClick={() => onRemove(index)}>
+                        <Trash2 size={18} />
+                      </IconButton>
+                    </Tooltip>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {!rules.length && (
+                <TableRow>
+                  <TableCell colSpan={8}>
+                    <EmptyHint text="Bo'sh" />
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </Box>
+      )}
     </Stack>
+  );
+}
+
+function RuleCard({
+  rule,
+  index,
+  onUpdate,
+  onCommit,
+  onToggle,
+  onRemove
+}: {
+  rule: KeywordRule;
+  index: number;
+  onUpdate: (index: number, patch: Partial<KeywordRule>) => void;
+  onCommit: () => void;
+  onToggle: (index: number, enabled: boolean) => void;
+  onRemove: (index: number) => void;
+}) {
+  return (
+    <Paper variant="outlined" sx={{ p: 1.5 }}>
+      <Stack spacing={1.25}>
+        <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <FormControlLabel
+            control={
+              <Switch checked={rule.enabled} onChange={(event) => onToggle(index, event.target.checked)} />
+            }
+            label={rule.enabled ? 'Yoqilgan' : "O'chiq"}
+          />
+          <Tooltip title="O'chirish">
+            <IconButton color="error" onClick={() => onRemove(index)}>
+              <Trash2 size={18} />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+        <TextField
+          label="Key (link)"
+          value={rule.text}
+          onChange={(event) => onUpdate(index, { text: event.target.value })}
+          onBlur={() => onCommit()}
+          fullWidth
+        />
+        <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 1 }}>
+          <TextField
+            label="Kutish"
+            value={rule.interval_seconds}
+            onChange={(event) => onUpdate(index, { interval_seconds: Number(event.target.value) })}
+            onBlur={() => onCommit()}
+            type="number"
+            slotProps={{
+              htmlInput: { min: 2, max: 86400 },
+              input: { endAdornment: <InputAdornment position="end">s</InputAdornment> }
+            }}
+          />
+          <TextField
+            label="Quality"
+            value={rule.order_quantity}
+            onChange={(event) => onUpdate(index, { order_quantity: Number(event.target.value) })}
+            onBlur={() => onCommit()}
+            type="number"
+            slotProps={{ htmlInput: { min: 1, max: 1000000 } }}
+          />
+          <TextField
+            label="SMM ID"
+            value={rule.service_id}
+            onChange={(event) => onUpdate(index, { service_id: Number(event.target.value) })}
+            onBlur={() => onCommit()}
+            type="number"
+            slotProps={{ htmlInput: { min: 1 } }}
+          />
+        </Box>
+        <Stack direction="row" sx={{ justifyContent: 'space-between' }}>
+          <Typography variant="caption" color="text.secondary">
+            Oxirgi: {formatDate(rule.last_checked_at)}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            Keyingi: {formatDate(rule.next_check_at)}
+          </Typography>
+        </Stack>
+      </Stack>
+    </Paper>
   );
 }
 
@@ -1029,12 +1277,7 @@ function ListEditor({
       </Stack>
       <Stack direction="row" sx={{ gap: 1, flexWrap: 'wrap' }}>
         {items.map((item) => (
-          <Chip
-            key={item}
-            label={item}
-            onDelete={() => onRemove(item)}
-            sx={{ maxWidth: '100%' }}
-          />
+          <Chip key={item} label={item} onDelete={() => onRemove(item)} sx={{ maxWidth: '100%' }} />
         ))}
         {!items.length && <Typography color="text.secondary">Bo'sh</Typography>}
       </Stack>
@@ -1083,6 +1326,14 @@ function TelegramPanel(props: TelegramPanelProps) {
 
   return (
     <Stack spacing={3}>
+      {connected && (
+        <Alert severity="success" icon={<CircleCheck size={18} />}>
+          Userbot ulangan.
+        </Alert>
+      )}
+      {waitingFor === 'code' && <Alert severity="info">Telegramdan kelgan kodni kiriting.</Alert>}
+      {waitingFor === 'password' && <Alert severity="info">2FA parolni kiriting.</Alert>}
+
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr 1fr' }, gap: 2 }}>
         <TextField
           label="API ID"
@@ -1115,12 +1366,7 @@ function TelegramPanel(props: TelegramPanelProps) {
       </Box>
 
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-        <Button
-          variant="contained"
-          onClick={requestCode}
-          disabled={busy}
-          startIcon={<Send size={18} />}
-        >
+        <Button variant="contained" onClick={requestCode} disabled={busy} startIcon={<Send size={18} />}>
           Kod olish
         </Button>
         <Button
@@ -1136,7 +1382,14 @@ function TelegramPanel(props: TelegramPanelProps) {
 
       <Divider />
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr auto' }, gap: 2, alignItems: 'center' }}>
+      <Box
+        sx={{
+          display: 'grid',
+          gridTemplateColumns: { xs: '1fr', md: '1fr 1fr auto' },
+          gap: 2,
+          alignItems: 'center'
+        }}
+      >
         <TextField
           label="Kod"
           value={tgCode}
@@ -1170,131 +1423,222 @@ function ResultsPanel({
   results,
   runScan,
   clearResults,
-  busy
+  busy,
+  isMobile
 }: {
   results: AdResult[];
   runScan: () => void;
   clearResults: () => void;
   busy: boolean;
+  isMobile: boolean;
 }) {
   const sorted = useMemo(() => results, [results]);
 
   return (
     <Stack spacing={2}>
-      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ justifyContent: 'space-between' }}>
-        <Typography variant="h6">Topilgan ads</Typography>
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        spacing={1}
+        sx={{ justifyContent: 'space-between', alignItems: { sm: 'center' } }}
+      >
+        <Typography variant="h6">Topilgan ads ({sorted.length})</Typography>
         <Stack direction="row" spacing={1}>
-          <Button variant="contained" onClick={runScan} disabled={busy} startIcon={<Play size={18} />}>
+          <Button variant="contained" onClick={runScan} disabled={busy} startIcon={<Play size={18} />} sx={{ flex: { xs: 1, sm: 'initial' } }}>
             Hozir tekshirish
           </Button>
-          <Button variant="outlined" color="error" onClick={clearResults} disabled={busy} startIcon={<Trash2 size={18} />}>
+          <Button
+            variant="outlined"
+            color="error"
+            onClick={clearResults}
+            disabled={busy}
+            startIcon={<Trash2 size={18} />}
+            sx={{ flex: { xs: 1, sm: 'initial' } }}
+          >
             Tozalash
           </Button>
         </Stack>
       </Stack>
 
-      <Box sx={{ overflowX: 'auto' }}>
-        <Table sx={{ minWidth: 1540 }}>
-          <TableHead>
-            <TableRow>
-              <TableCell>Vaqt</TableCell>
-              <TableCell>Kanal</TableCell>
-              <TableCell>Target</TableCell>
-              <TableCell>Kalit</TableCell>
-              <TableCell>Sarlavha</TableCell>
-              <TableCell>Matn</TableCell>
-              <TableCell>Sponsor</TableCell>
-              <TableCell>Qo'shimcha</TableCell>
-              <TableCell>URL</TableCell>
-              <TableCell>ID</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {sorted.map((item) => (
-              <TableRow key={item.id} hover>
-                <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(item.found_at)}</TableCell>
-                <TableCell className="text-clamp">
-                  <Typography sx={{ fontWeight: 800 }}>{item.channel_title || item.channel}</Typography>
-                  <Typography variant="caption" color="text.secondary">@{item.channel}</Typography>
-                </TableCell>
-                <TableCell className="text-clamp">
-                  {formatChannel(item.target_channel)}
-                </TableCell>
-                <TableCell>
-                  <Stack direction="row" sx={{ gap: 0.5, flexWrap: 'wrap' }}>
-                    {(item.matched_keywords.length ? item.matched_keywords : ['all']).map((keyword) => (
-                      <Chip key={keyword} label={keyword} size="small" color="secondary" />
-                    ))}
-                  </Stack>
-                </TableCell>
-                <TableCell className="text-clamp" sx={{ maxWidth: 220 }}>{item.title}</TableCell>
-                <TableCell className="text-clamp" sx={{ maxWidth: 340 }}>{item.message}</TableCell>
-                <TableCell className="text-clamp" sx={{ maxWidth: 240 }}>
-                  {item.sponsor_info || '-'}
-                </TableCell>
-                <TableCell className="text-clamp" sx={{ maxWidth: 240 }}>
-                  {item.additional_info || '-'}
-                </TableCell>
-                <TableCell className="text-clamp" sx={{ maxWidth: 220 }}>
-                  <Link href={item.url} target="_blank" rel="noreferrer">{item.url}</Link>
-                  <Typography variant="caption" sx={{ display: 'block' }} color="text.secondary">
-                    {item.button_text}
-                  </Typography>
-                  {item.recommended && (
-                    <Chip label="recommended" size="small" color="secondary" sx={{ mt: 0.75 }} />
-                  )}
-                </TableCell>
-                <TableCell className="text-clamp" sx={{ maxWidth: 180 }}>
-                  <Typography variant="caption">{item.random_id_hex}</Typography>
-                </TableCell>
-              </TableRow>
-            ))}
-            {!sorted.length && (
+      {isMobile ? (
+        <Stack spacing={1.25}>
+          {sorted.map((item) => (
+            <ResultCard key={item.id} item={item} />
+          ))}
+          {!sorted.length && <EmptyHint text="Natija yo'q" />}
+        </Stack>
+      ) : (
+        <Box sx={{ overflowX: 'auto' }}>
+          <Table sx={{ minWidth: 1540 }}>
+            <TableHead>
               <TableRow>
-                <TableCell colSpan={10}>
-                  <Box
-                    sx={{
-                      p: 4,
-                      textAlign: 'center',
-                      bgcolor: (theme) => alpha(theme.palette.primary.main, 0.04)
-                    }}
-                  >
-                    <Typography color="text.secondary">Natija yo'q</Typography>
-                  </Box>
-                </TableCell>
+                <TableCell>Vaqt</TableCell>
+                <TableCell>Kanal</TableCell>
+                <TableCell>Target</TableCell>
+                <TableCell>Kalit</TableCell>
+                <TableCell>Sarlavha</TableCell>
+                <TableCell>Matn</TableCell>
+                <TableCell>Sponsor</TableCell>
+                <TableCell>Qo'shimcha</TableCell>
+                <TableCell>URL</TableCell>
+                <TableCell>ID</TableCell>
               </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </Box>
+            </TableHead>
+            <TableBody>
+              {sorted.map((item) => (
+                <TableRow key={item.id} hover>
+                  <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(item.found_at)}</TableCell>
+                  <TableCell className="text-clamp">
+                    <Typography sx={{ fontWeight: 800 }}>{item.channel_title || item.channel}</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      @{item.channel}
+                    </Typography>
+                  </TableCell>
+                  <TableCell className="text-clamp">{formatChannel(item.target_channel)}</TableCell>
+                  <TableCell>
+                    <Stack direction="row" sx={{ gap: 0.5, flexWrap: 'wrap' }}>
+                      {(item.matched_keywords.length ? item.matched_keywords : ['all']).map((keyword) => (
+                        <Chip key={keyword} label={keyword} size="small" color="secondary" />
+                      ))}
+                    </Stack>
+                  </TableCell>
+                  <TableCell className="text-clamp" sx={{ maxWidth: 220 }}>
+                    {item.title}
+                  </TableCell>
+                  <TableCell className="text-clamp" sx={{ maxWidth: 340 }}>
+                    {item.message}
+                  </TableCell>
+                  <TableCell className="text-clamp" sx={{ maxWidth: 240 }}>
+                    {item.sponsor_info || '-'}
+                  </TableCell>
+                  <TableCell className="text-clamp" sx={{ maxWidth: 240 }}>
+                    {item.additional_info || '-'}
+                  </TableCell>
+                  <TableCell className="text-clamp" sx={{ maxWidth: 220 }}>
+                    <Link href={item.url} target="_blank" rel="noreferrer">
+                      {item.url}
+                    </Link>
+                    <Typography variant="caption" sx={{ display: 'block' }} color="text.secondary">
+                      {item.button_text}
+                    </Typography>
+                    {item.recommended && <Chip label="recommended" size="small" color="secondary" sx={{ mt: 0.75 }} />}
+                  </TableCell>
+                  <TableCell className="text-clamp" sx={{ maxWidth: 180 }}>
+                    <Typography variant="caption">{item.random_id_hex}</Typography>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {!sorted.length && (
+                <TableRow>
+                  <TableCell colSpan={10}>
+                    <EmptyHint text="Natija yo'q" />
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </Box>
+      )}
     </Stack>
+  );
+}
+
+function ResultCard({ item }: { item: AdResult }) {
+  return (
+    <Paper variant="outlined" sx={{ p: 1.5 }}>
+      <Stack spacing={0.75}>
+        <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 1 }}>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography sx={{ fontWeight: 800 }} className="text-clamp">
+              {item.channel_title || item.channel}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              @{item.channel}
+            </Typography>
+          </Box>
+          <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
+            {formatDate(item.found_at)}
+          </Typography>
+        </Stack>
+
+        <Stack direction="row" sx={{ gap: 0.5, flexWrap: 'wrap' }}>
+          {(item.matched_keywords.length ? item.matched_keywords : ['all']).map((keyword) => (
+            <Chip key={keyword} label={keyword} size="small" color="secondary" />
+          ))}
+          {item.recommended && <Chip label="recommended" size="small" />}
+        </Stack>
+
+        {item.title && (
+          <Typography sx={{ fontWeight: 700 }} className="text-clamp">
+            {item.title}
+          </Typography>
+        )}
+        {item.message && (
+          <Typography variant="body2" className="text-clamp" color="text.secondary">
+            {item.message}
+          </Typography>
+        )}
+
+        <Divider sx={{ my: 0.5 }} />
+        <FieldRow label="Target">{formatChannel(item.target_channel)}</FieldRow>
+        {item.sponsor_info && (
+          <FieldRow label="Sponsor">
+            <span className="text-clamp">{item.sponsor_info}</span>
+          </FieldRow>
+        )}
+        <FieldRow label="URL">
+          <Link href={item.url} target="_blank" rel="noreferrer" className="text-clamp">
+            {item.button_text || item.url}
+          </Link>
+        </FieldRow>
+      </Stack>
+    </Paper>
   );
 }
 
 function LogsPanel({
   logs,
   clearLogs,
-  busy
+  busy,
+  isMobile
 }: {
   logs: PanelLog[];
   clearLogs: () => void;
   busy: boolean;
+  isMobile: boolean;
 }) {
   return (
-    <Paper sx={{ p: { xs: 2, md: 3 } }}>
-      <Stack spacing={2}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ justifyContent: 'space-between' }}>
-          <Box>
-            <Typography variant="h5">Loglar</Typography>
-            <Typography variant="body2" color="text.secondary">
-              Scan, oq/qora ro'yxat qarori va SMMMAIN order javoblari
-            </Typography>
-          </Box>
-          <Button variant="outlined" color="error" onClick={clearLogs} disabled={busy} startIcon={<Trash2 size={18} />}>
-            Tozalash
-          </Button>
-        </Stack>
+    <Stack spacing={2}>
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        spacing={1}
+        sx={{ justifyContent: 'space-between', alignItems: { sm: 'center' } }}
+      >
+        <Box>
+          <Typography variant="h6">Loglar ({logs.length})</Typography>
+          <Typography variant="body2" color="text.secondary">
+            Scan, oq/qora ro'yxat qarori va SMMMAIN order javoblari
+          </Typography>
+        </Box>
+        <Button
+          variant="outlined"
+          color="error"
+          onClick={clearLogs}
+          disabled={busy}
+          startIcon={<Trash2 size={18} />}
+          sx={{ flex: { xs: 1, sm: 'initial' } }}
+        >
+          Tozalash
+        </Button>
+      </Stack>
 
+      {isMobile ? (
+        <Stack spacing={1.25}>
+          {logs.map((log) => (
+            <LogCard key={log.id} log={log} />
+          ))}
+          {!logs.length && <EmptyHint text="Log yo'q" />}
+        </Stack>
+      ) : (
         <Box sx={{ overflowX: 'auto' }}>
           <Table sx={{ minWidth: 1320 }}>
             <TableHead>
@@ -1314,11 +1658,7 @@ function LogsPanel({
                 <TableRow key={log.id} hover>
                   <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(log.created_at)}</TableCell>
                   <TableCell>
-                    <Chip
-                      size="small"
-                      label={log.level}
-                      color={log.level === 'success' ? 'secondary' : log.level === 'error' ? 'error' : 'default'}
-                    />
+                    <LevelChip level={log.level} />
                   </TableCell>
                   <TableCell className="text-clamp" sx={{ maxWidth: 360 }}>
                     <Typography sx={{ fontWeight: 800 }}>{log.title}</Typography>
@@ -1350,23 +1690,107 @@ function LogsPanel({
               {!logs.length && (
                 <TableRow>
                   <TableCell colSpan={8}>
-                    <Box
-                      sx={{
-                        p: 4,
-                        textAlign: 'center',
-                        bgcolor: (theme) => alpha(theme.palette.primary.main, 0.04)
-                      }}
-                    >
-                      <Typography color="text.secondary">Log yo'q</Typography>
-                    </Box>
+                    <EmptyHint text="Log yo'q" />
                   </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
         </Box>
+      )}
+    </Stack>
+  );
+}
+
+function LogCard({ log }: { log: PanelLog }) {
+  return (
+    <Paper variant="outlined" sx={{ p: 1.5 }}>
+      <Stack spacing={0.75}>
+        <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', gap: 1 }}>
+          <LevelChip level={log.level} />
+          <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
+            {formatDate(log.created_at)}
+          </Typography>
+        </Stack>
+        <Typography sx={{ fontWeight: 800 }} className="text-clamp">
+          {log.title}
+        </Typography>
+        <Typography variant="body2" className="text-clamp">
+          {log.message}
+        </Typography>
+        {log.keyword && <FieldRow label="Key">{log.keyword}</FieldRow>}
+        {log.source_channel && <FieldRow label="Source">{log.source_channel}</FieldRow>}
+        {log.target_channel && <FieldRow label="Target">{log.target_channel}</FieldRow>}
+        {(log.service_id || log.quantity || log.order_id) && (
+          <FieldRow label="Order">
+            <span>
+              {`s:${log.service_id ?? '-'} · q:${log.quantity ?? '-'} · #${log.order_id ?? '-'}`}
+            </span>
+          </FieldRow>
+        )}
+        {log.order_link && (
+          <FieldRow label="Link">
+            <Link href={log.order_link} target="_blank" rel="noreferrer" className="text-clamp">
+              {log.order_link}
+            </Link>
+          </FieldRow>
+        )}
+        {log.raw_response && (
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            className="text-clamp"
+            sx={{ display: 'block', mt: 0.5 }}
+          >
+            {log.raw_response}
+          </Typography>
+        )}
       </Stack>
     </Paper>
+  );
+}
+
+function LevelChip({ level }: { level: string }) {
+  return (
+    <Chip
+      size="small"
+      label={level}
+      color={level === 'success' ? 'secondary' : level === 'error' ? 'error' : level === 'warning' ? 'warning' : 'default'}
+    />
+  );
+}
+
+function FieldRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'baseline' }}>
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
+        {label}
+      </Typography>
+      <Box sx={{ minWidth: 0, textAlign: 'right' }}>
+        {typeof children === 'string' ? (
+          <Typography variant="body2" className="text-clamp">
+            {children}
+          </Typography>
+        ) : (
+          children
+        )}
+      </Box>
+    </Box>
+  );
+}
+
+function EmptyHint({ text }: { text: string }) {
+  return (
+    <Box
+      sx={{
+        p: 3,
+        textAlign: 'center',
+        borderRadius: 1,
+        bgcolor: (theme) => alpha(theme.palette.primary.main, 0.04)
+      }}
+    >
+      <Typography color="text.secondary">{text}</Typography>
+    </Box>
   );
 }
 

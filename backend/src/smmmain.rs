@@ -22,6 +22,11 @@ pub struct SmmBalanceOutcome {
     pub currency: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct SmmStatusOutcome {
+    pub status: Option<String>,
+}
+
 impl SmmMainService {
     pub fn new(api_key: String, api_url: String, service_id: u64) -> Self {
         Self {
@@ -86,10 +91,61 @@ impl SmmMainService {
             return Err(anyhow!("SMMMAIN xato qaytardi: {error}"));
         }
 
+        // Muvaffaqiyatli javobda doim "order" id bo'ladi. Bo'lmasa, orderni
+        // muvaffaqiyatli deb hisoblamaymiz (aks holda rad etilgan order ham
+        // "yuborildi" deb belgilanib qolardi).
         let order_id = value.get("order").map(value_to_string);
+        if order_id.is_none() {
+            return Err(anyhow!(
+                "SMMMAIN order id qaytarmadi, javob: {raw_response}"
+            ));
+        }
+
         Ok(SmmOrderOutcome {
             order_id,
             raw_response,
+        })
+    }
+
+    /// Berilgan order id holatini smmmain.com `status` action orqali oladi.
+    pub async fn order_status(&self, order_id: &str) -> Result<SmmStatusOutcome> {
+        if !self.is_configured() {
+            bail!("SMMMAIN_API_KEY .env ichida kiritilmagan");
+        }
+
+        let form = [
+            ("key", self.api_key.trim()),
+            ("action", "status"),
+            ("order", order_id.trim()),
+        ];
+
+        let response = self
+            .http
+            .post(self.api_url.trim())
+            .form(&form)
+            .send()
+            .await
+            .context("SMMMAIN status API ga ulanishda xatolik")?;
+
+        let status = response.status();
+        let raw_response = response
+            .text()
+            .await
+            .context("SMMMAIN status javobini o'qib bo'lmadi")?;
+
+        if !status.is_success() {
+            bail!("SMMMAIN status HTTP {status}: {raw_response}");
+        }
+
+        let value = serde_json::from_str::<Value>(&raw_response)
+            .with_context(|| format!("SMMMAIN status JSON javobi tushunarsiz: {raw_response}"))?;
+
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(anyhow!("SMMMAIN status xato qaytardi: {error}"));
+        }
+
+        Ok(SmmStatusOutcome {
+            status: value.get("status").map(value_to_string),
         })
     }
 

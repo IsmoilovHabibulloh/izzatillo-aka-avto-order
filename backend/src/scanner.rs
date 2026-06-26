@@ -1,12 +1,22 @@
 use crate::api::AppState;
 use crate::models::{
-    AdResult, DEFAULT_SMMMAIN_SERVICE_ID, KeywordRule, PanelLog, ScanResponse, Settings,
+    AdResult, DEFAULT_SMMMAIN_SERVICE_ID, KeywordRule, OrderRecord, PanelLog, ScanResponse, Settings,
 };
 use crate::telegram::normalize_channel_ref;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
+use std::collections::HashSet;
 use tokio::time::{Duration as TokioDuration, sleep};
 use tracing::{error, info};
+
+/// Bir xil reklama qayta topilganda, oldingi order hali bajarilmagan bo'lsa
+/// shuncha daqiqa kutib turamiz; shu vaqtdan keyin baribir qayta yuborishga ruxsat.
+const ORDER_RECHECK_MINUTES: i64 = 10;
+
+/// SMMMAIN `status` endpointini eng ko'pi bilan shu sekundda bir marta chaqiramiz.
+/// Skan intervali kichik (masalan 5s) bo'lsa ham, bir order uchun status so'rovi
+/// shu vaqtdan tez-tez yuborilmaydi — API rate-limitiga tushmaslik uchun.
+const ORDER_STATUS_MIN_RECHECK_SECONDS: i64 = 30;
 
 pub async fn scanner_loop(state: AppState) {
     loop {
@@ -61,32 +71,32 @@ async fn scan_with_mode(state: AppState, force: bool) -> Result<ScanResponse> {
         runtime.last_error = None;
     }
 
-    let result = scan_inner(&state, force).await;
+    // scan_inner'ni alohida taskда ishga tushiramiz: agar u panik bersa ham
+    // `scanning` bayrog'i quyida albatta tiklanadi. Aks holda bitta panik skanerni
+    // abadiy "ishlayapti" holatida qoldirib, undan keyingi barcha skanlarni bloklardi.
+    let task_state = state.clone();
+    let join = tokio::spawn(async move { scan_inner(&task_state, force).await }).await;
 
     {
         let mut runtime = state.runtime.write().await;
         runtime.scanning = false;
         runtime.last_run_at = Some(Utc::now());
-        if let Err(err) = &result {
-            runtime.last_error = Some(err.to_string());
+        match &join {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => runtime.last_error = Some(err.to_string()),
+            Err(join_err) => runtime.last_error = Some(format!("Skaner ichki xatosi: {join_err}")),
         }
     }
 
-    result
+    match join {
+        Ok(inner) => inner,
+        Err(join_err) => Err(anyhow!("Skaner ichki xatosi: {join_err}")),
+    }
 }
 
 async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
     let settings = state.store.settings().await;
     let telegram_settings = state.store.telegram_settings().await;
-
-    if settings.channels.is_empty() {
-        return Ok(ScanResponse {
-            added: 0,
-            checked_channels: 0,
-            checked_keywords: 0,
-            message: "Kanal ro'yxati bo'sh".to_string(),
-        });
-    }
 
     let now = Utc::now();
     let active_keywords = active_keyword_count(&settings);
@@ -117,46 +127,60 @@ async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
         "info",
         "Scan boshlandi",
         format!(
-            "{} ta key navbatda: {}. Tekshiriladigan kanallar: {}",
+            "{} ta key bo'yicha global qidiruv: {}",
             keywords.len(),
-            keywords.join(", "),
-            settings.channels.join(", ")
+            keywords.join(", ")
         ),
     )];
-    let mut checked = 0usize;
 
-    for channel in &settings.channels {
-        checked += 1;
-        match state
-            .telegram
-            .get_sponsored_messages(&client, channel, &keywords)
-            .await
-        {
+    for query in &keywords {
+        match state.telegram.get_sponsored_peers(&client, query).await {
             Ok(mut ads) => collected.append(&mut ads),
             Err(err) => {
-                let message = format!("{channel}: {err}");
+                let message = format!("{query}: {err}");
                 state.runtime.write().await.last_error = Some(message.clone());
                 let mut log = PanelLog::new(
                     "error",
-                    "Kanal tekshirishda xato",
-                    format!("{channel} kanalidan ads olib bo'lmadi: {err}"),
+                    "Qidiruvda xato",
+                    format!("'{query}' key bo'yicha qidiruvda xato: {err}"),
                 );
-                log.source_channel = Some(channel.clone());
+                log.keyword = Some(query.clone());
                 scan_logs.push(log);
             }
         }
     }
 
-    let added_items = state.store.push_results(collected).await?;
-    let action_logs = process_ad_actions(state, &settings, &added_items).await;
+    // Natijalarni saqlash xato bersa ham, shu paytgacha to'plangan loglar
+    // (kanal xatolari) yo'qolmasligi uchun ularni avval flush qilamiz.
+    let added_items = match state.store.push_results(collected.clone()).await {
+        Ok(items) => items,
+        Err(err) => {
+            scan_logs.push(PanelLog::new(
+                "error",
+                "Natijalarni saqlashda xato",
+                err.to_string(),
+            ));
+            let _ = state.store.push_logs(scan_logs).await;
+            return Err(err);
+        }
+    };
+
+    let action_logs = process_scan_actions(state, &settings, &collected, &added_items).await;
     scan_logs.extend(action_logs);
-    state.store.mark_keywords_checked(&keywords, now).await?;
+
+    if let Err(err) = state.store.mark_keywords_checked(&keywords, now).await {
+        scan_logs.push(PanelLog::new(
+            "error",
+            "Key holatini saqlashda xato",
+            err.to_string(),
+        ));
+    }
 
     scan_logs.push(PanelLog::new(
         "success",
         "Scan yakunlandi",
         format!(
-            "{} ta key, {checked} ta kanal tekshirildi. {} ta yangi ads topildi.",
+            "{} ta key bo'yicha qidirildi. {} ta yangi natija topildi.",
             keywords.len(),
             added_items.len()
         ),
@@ -165,24 +189,38 @@ async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
 
     Ok(ScanResponse {
         added: added_items.len(),
-        checked_channels: checked,
+        checked_channels: 0,
         checked_keywords: keywords.len(),
         message: format!(
-            "{} ta key, {checked} ta kanal tekshirildi, {added} ta yangi natija",
+            "{} ta key bo'yicha qidirildi, {added} ta yangi natija",
             keywords.len(),
             added = added_items.len()
         ),
     })
 }
 
-async fn process_ad_actions(
+/// Order yuborish-yubormaslik qarori. String — sabab (log uchun).
+enum OrderDecision {
+    /// Order (qayta) yuborilsin.
+    Place(String),
+    /// Hozircha kutilsin.
+    Wait(String),
+}
+
+async fn process_scan_actions(
     state: &AppState,
     settings: &Settings,
-    ads: &[AdResult],
+    collected: &[AdResult],
+    added: &[AdResult],
 ) -> Vec<PanelLog> {
     let mut logs = Vec::new();
+    let now = Utc::now();
 
-    for ad in ads {
+    // 1) Yangi topilgan, lekin order chiqarmaydigan reklamalar uchun bir martalik
+    //    info loglar (oq ro'yxat / ro'yxatda yo'q). Bular faqat `added` (birinchi
+    //    marta ko'rilgan) reklamalar uchun yoziladi, shuning uchun har skanда takror
+    //    bo'lmaydi.
+    for ad in added {
         let target = ad
             .target_channel
             .clone()
@@ -205,7 +243,7 @@ async fn process_ad_actions(
                 "warning",
                 "Order yuborilmadi: oq ro'yxat",
                 format!(
-                    "{} oq ro'yxatda bor. Key: {display_keywords}. Qora ro'yxat mos kelsa ham order yuborilmaydi.",
+                    "{} oq ro'yxatda bor. Key: {display_keywords}. Order yuborilmaydi.",
                     matched.display
                 ),
                 ad,
@@ -218,7 +256,7 @@ async fn process_ad_actions(
             continue;
         }
 
-        let Some(matched) = black_match else {
+        if black_match.is_none() {
             let mut log = base_ad_log(
                 "info",
                 "Order yuborilmadi: ro'yxatda yo'q",
@@ -233,57 +271,214 @@ async fn process_ad_actions(
             log.raw_response =
                 Some("SMMMAIN chaqirilmadi, sabab: qora ro'yxatda moslik yo'q".to_string());
             logs.push(log);
+        }
+    }
+
+    // 2) Order gating — bu skanда topilgan barcha qora-ro'yxat mos reklamalar.
+    //    Har bir link (key matni) bo'yicha bir marta hal qilinadi. `collected`
+    //    (faqat `added` emas) ishlatiladi, chunki bir reklama qayta topilganda
+    //    oldingi order holatiga qarab qayta yuborilishi mumkin.
+    let mut handled_links: HashSet<String> = HashSet::new();
+
+    for ad in collected {
+        let target = ad
+            .target_channel
+            .clone()
+            .or_else(|| normalize_channel_ref(&ad.url));
+        let Some(matched) = find_list_match(target.as_deref(), &ad.url, &settings.blacklist_channels)
+        else {
             continue;
         };
+        // Oq ro'yxat qora ro'yxatdan ustun: oq ro'yxatda bo'lsa order yo'q.
+        if find_list_match(target.as_deref(), &ad.url, &settings.whitelist_channels).is_some() {
+            continue;
+        }
 
-        for order_key in order_keys {
-            let mut log = base_ad_log(
-                "info",
-                "Qora ro'yxat mos keldi",
-                format!(
-                    "{} qora ro'yxatda topildi. SMMMAIN service {} ga order yuborilmoqda. Link: {}. Quality: {}.",
-                    matched.display, order_key.service_id, order_key.text, order_key.quantity
-                ),
-                ad,
-                &order_key.text,
-                Some(&matched),
-            );
-            log.order_link = Some(order_key.text.clone());
-            log.quantity = Some(order_key.quantity);
-            log.service_id = Some(order_key.service_id);
-
-            match state
-                .smmmain
-                .send_order(order_key.service_id, &order_key.text, order_key.quantity)
-                .await
-            {
-                Ok(outcome) => {
-                    log.level = "success".to_string();
-                    log.title = "Order yuborildi".to_string();
-                    log.message = format!(
-                        "{} uchun SMMMAIN order yuborildi. Link: {}. Service: {}, quality: {}.",
-                        matched.display, order_key.text, order_key.service_id, order_key.quantity
-                    );
-                    log.order_id = outcome.order_id;
-                    log.raw_response = Some(outcome.raw_response);
-                }
-                Err(err) => {
-                    log.level = "error".to_string();
-                    log.title = "Order yuborishda xato".to_string();
-                    log.message = format!(
-                        "{} qora ro'yxatda topildi, lekin SMMMAIN order yuborilmadi. Link: {}. Xato: {err}",
-                        matched.display, order_key.text
-                    );
-                    log.raw_response = Some(err.to_string());
-                    state.runtime.write().await.last_error = Some(log.message.clone());
-                }
+        for order_key in matched_order_keys(settings, &ad.matched_keywords) {
+            let link_key = order_key.text.trim().to_lowercase();
+            if link_key.is_empty() || !handled_links.insert(link_key) {
+                continue;
             }
 
-            logs.push(log);
+            let record = state.store.order_record(&order_key.text).await;
+            match decide_order(state, &record, now).await {
+                OrderDecision::Wait(reason) => {
+                    // Jimgina kutamiz — loglarni spam qilmaymiz. Holat yangilanishi
+                    // (agar status tekshirilgan bo'lsa) decide_order ichida bo'ladi.
+                    info!(link = %order_key.text, reason = %reason, "order kutilyapti");
+                }
+                OrderDecision::Place(reason) => {
+                    let mut log = base_ad_log(
+                        "info",
+                        "Order yuborilmoqda",
+                        format!(
+                            "{} qora ro'yxatda. {reason}. SMMMAIN service {}, link {}, quality {}.",
+                            matched.display, order_key.service_id, order_key.text, order_key.quantity
+                        ),
+                        ad,
+                        &order_key.text,
+                        Some(&matched),
+                    );
+                    log.order_link = Some(order_key.text.clone());
+                    log.service_id = Some(order_key.service_id);
+                    log.quantity = Some(order_key.quantity);
+
+                    match state
+                        .smmmain
+                        .send_order(order_key.service_id, &order_key.text, order_key.quantity)
+                        .await
+                    {
+                        Ok(outcome) => {
+                            log.level = "success".to_string();
+                            log.title = "Order yuborildi".to_string();
+                            log.message = format!(
+                                "{} uchun SMMMAIN order yuborildi. Link: {}. Service: {}, quality: {}.",
+                                matched.display,
+                                order_key.text,
+                                order_key.service_id,
+                                order_key.quantity
+                            );
+                            log.order_id = outcome.order_id.clone();
+                            log.raw_response = Some(outcome.raw_response);
+
+                            let _ = state
+                                .store
+                                .upsert_order_record(OrderRecord {
+                                    link: order_key.text.clone(),
+                                    order_id: outcome.order_id,
+                                    service_id: order_key.service_id,
+                                    quantity: order_key.quantity,
+                                    status: Some("pending".to_string()),
+                                    created_at: now,
+                                    last_checked_at: Some(now),
+                                })
+                                .await;
+                        }
+                        Err(err) => {
+                            log.level = "error".to_string();
+                            log.title = "Order yuborishda xato".to_string();
+                            log.message = format!(
+                                "{} qora ro'yxatda topildi, lekin SMMMAIN order yuborilmadi. Link: {}. Xato: {err}",
+                                matched.display, order_key.text
+                            );
+                            log.raw_response = Some(err.to_string());
+                            state.runtime.write().await.last_error = Some(log.message.clone());
+
+                            // Muvaffaqiyatsiz urinishni ham yozib qo'yamiz (order_id yo'q):
+                            // shu link uchun 10 daqiqagacha qayta urinmaslik, ya'ni SMMMAIN'ni
+                            // doimiy xatoda bombardimon qilmaslik uchun.
+                            let _ = state
+                                .store
+                                .upsert_order_record(OrderRecord {
+                                    link: order_key.text.clone(),
+                                    order_id: None,
+                                    service_id: order_key.service_id,
+                                    quantity: order_key.quantity,
+                                    status: Some("error".to_string()),
+                                    created_at: now,
+                                    last_checked_at: Some(now),
+                                })
+                                .await;
+                        }
+                    }
+
+                    logs.push(log);
+                }
+            }
         }
     }
 
     logs
+}
+
+/// Berilgan link uchun order (qayta) yuborilishini hal qiladi.
+///
+/// - Yozuv yo'q bo'lsa → yuboriladi (birinchi marta).
+/// - Oxirgi orderdan `ORDER_RECHECK_MINUTES` daqiqa o'tgan bo'lsa → qayta yuboriladi.
+/// - Aks holda oldingi order holati tekshiriladi: bajarilgan bo'lsa → qayta yuboriladi,
+///   hali bajarilayotgan/noma'lum bo'lsa → kutiladi.
+async fn decide_order(
+    state: &AppState,
+    record: &Option<OrderRecord>,
+    now: DateTime<Utc>,
+) -> OrderDecision {
+    let Some(record) = record else {
+        return OrderDecision::Place("birinchi marta order yuborilmoqda".to_string());
+    };
+
+    let elapsed = (now - record.created_at).num_minutes();
+    if elapsed >= ORDER_RECHECK_MINUTES {
+        return OrderDecision::Place(format!(
+            "oldingi orderdan {elapsed} daqiqa o'tdi, qayta yuboriladi"
+        ));
+    }
+
+    let Some(order_id) = record.order_id.as_deref() else {
+        return OrderDecision::Wait(
+            "oldingi urinish muvaffaqiyatsiz edi, qayta urinishdan oldin kutilyapti".to_string(),
+        );
+    };
+
+    // Status endpointini juda tez-tez chaqirmaymiz: oxirgi tekshiruvdan beri
+    // ORDER_STATUS_MIN_RECHECK_SECONDS o'tmagan bo'lsa, eski holat bilan kutamiz.
+    if let Some(last) = record.last_checked_at {
+        if (now - last).num_seconds() < ORDER_STATUS_MIN_RECHECK_SECONDS {
+            return OrderDecision::Wait(format!(
+                "oldingi order yaqinda tekshirilgan (holat: {})",
+                record.status.clone().unwrap_or_else(|| "noma'lum".to_string())
+            ));
+        }
+    }
+
+    match state.smmmain.order_status(order_id).await {
+        Ok(outcome) => {
+            let label = outcome
+                .status
+                .clone()
+                .unwrap_or_else(|| "noma'lum".to_string());
+            // Yangi holatni xotirada yangilaymiz (last_checked_at = now), shunda
+            // throttle keyingi safar to'g'ri ishlaydi.
+            state
+                .store
+                .touch_order_status(&record.link, outcome.status.clone(), now)
+                .await;
+            if is_order_active(outcome.status.as_deref()) {
+                OrderDecision::Wait(format!("oldingi order hali bajarilmoqda (holat: {label})"))
+            } else {
+                OrderDecision::Place(format!("oldingi order yakunlandi (holat: {label})"))
+            }
+        }
+        Err(err) => {
+            // Tekshirish vaqtini yangilaymiz, shunda xato beruvchi endpointni
+            // darhol qayta urinmaymiz.
+            state
+                .store
+                .touch_order_status(&record.link, record.status.clone(), now)
+                .await;
+            OrderDecision::Wait(format!("oldingi order holatini olib bo'lmadi: {err}"))
+        }
+    }
+}
+
+/// Order holati hali "ishlayotgan" (yakunlanmagan) bo'lsa true.
+/// Noma'lum (None) holat ham xavfsizlik uchun "ishlayapti" deb hisoblanadi,
+/// shuning uchun faqat 10 daqiqa o'tgachgina qayta yuboriladi.
+fn is_order_active(status: Option<&str>) -> bool {
+    match status {
+        Some(raw) => matches!(
+            raw.trim().to_lowercase().as_str(),
+            "pending"
+                | "in progress"
+                | "in_progress"
+                | "inprogress"
+                | "processing"
+                | "queue"
+                | "queued"
+                | "active"
+                | "started"
+        ),
+        None => true,
+    }
 }
 
 fn base_ad_log(

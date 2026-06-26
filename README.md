@@ -8,17 +8,19 @@ Rust + Grammers asosidagi Telegram Ads tekshiruvchi userbot va bitta serverdan i
 - React + MUI admin panel.
 - Admin login: `Izzatillo` / `Izzatilloaka`.
 - Telegram userbot ulash: API ID, API hash, telefon, kod, 2FA parol.
-- `messages.getSponsoredMessages` orqali ads natijasini olish.
+- `contacts.getSponsoredPeers` orqali har bir key (kalit so'z) bo'yicha GLOBAL sponsored qidiruv.
 - `messages.viewSponsoredMessage`, `messages.clickSponsoredMessage`, `messages.reportSponsoredMessage` chaqirilmaydi.
-- Interval, kalit so'zlar va kanallar paneldan sozlanadi.
+- Interval va keylar (kalit so'zlar) paneldan sozlanadi. Alohida "tekshiriladigan kanallar" ro'yxati yo'q — qidiruv global.
 - Default interval: 5 sekund.
 - Natijalar `data/state.json`da, Telegram session `data/userbot.session`da saqlanadi.
 
 ## Muhim izoh
 
-Kalit so'zlar Telegram serveriga qidiruv query sifatida yuborilmaydi. Telegram sponsored message qaytarganidan keyin filter lokal ishlaydi: title, message, url, sponsor info va additional info ichidan qidiradi.
+Har bir key Telegram serveriga `contacts.getSponsoredPeers` orqali global qidiruv query sifatida yuboriladi. Server o'sha query bo'yicha sponsored kanallarni qaytaradi; topilgan kanal qora ro'yxatga mos kelsa SMM order yuboriladi (oq ro'yxat bo'lsa — yo'q).
 
-Telegramning ichki MTProto holatlari va server tomondagi barcha hisob-kitoblarini yashirish kafolatlanmaydi. v1 faqat ads natijasini olish uchun `getSponsoredMessages` chaqiradi va ko'rildi/click/report requestlarini yubormaydi.
+Bir xil reklama qayta topilsa, oldingi order holati tekshiriladi: bajarilgan bo'lsa qayta yuboriladi, bajarilmagan bo'lsa kutiladi; 10 daqiqada ham bajarilmasa baribir qayta yuboriladi.
+
+Telegramning ichki MTProto holatlari va server tomondagi barcha hisob-kitoblarini yashirish kafolatlanmaydi. Bot faqat sponsored qidiruv natijasini oladi va ko'rildi/click/report requestlarini yubormaydi.
 
 ## Lokal ishga tushirish
 
@@ -112,7 +114,7 @@ certbot --nginx -d izzatillo-aka.vipads.uz
 3. `Kod olish` bosing.
 4. Telegramdan kelgan kodni kiriting.
 5. Agar 2FA yoqilgan bo'lsa, 2FA parolni kiriting.
-6. `Sozlamalar` tabida kanallar, kalit so'zlar va intervalni sozlang.
+6. `Sozlamalar` tabida keylar (kalit so'zlar), interval va qora/oq ro'yxatni sozlang. Sozlamalar avtomatik saqlanadi.
 7. `Natijalar` tabida avtomatik yoki qo'lda scan natijalarini ko'ring.
 
 ## Manbalar

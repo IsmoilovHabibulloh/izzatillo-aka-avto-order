@@ -1,11 +1,11 @@
-import { createTheme } from '@mui/material/styles';
+import { createTheme, responsiveFontSizes } from '@mui/material/styles';
 
 const heading = {
   fontWeight: 800,
   letterSpacing: 0
 };
 
-export const theme = createTheme({
+const baseTheme = createTheme({
   palette: {
     primary: {
       main: '#4D006E',
@@ -44,9 +44,13 @@ export const theme = createTheme({
   },
   components: {
     MuiButton: {
+      defaultProps: {
+        disableElevation: true
+      },
       styleOverrides: {
         root: {
-          minHeight: 40,
+          // Touch uchun qulay balandlik (mobil minimal tap target ~44px).
+          minHeight: 44,
           boxShadow: 'none'
         }
       }
@@ -65,6 +69,20 @@ export const theme = createTheme({
           letterSpacing: 0
         }
       }
+    },
+    MuiTextField: {
+      defaultProps: {
+        size: 'small'
+      }
+    },
+    MuiIconButton: {
+      styleOverrides: {
+        root: {
+          padding: 10
+        }
+      }
     }
   }
 });
+
+export const theme = responsiveFontSizes(baseTheme);

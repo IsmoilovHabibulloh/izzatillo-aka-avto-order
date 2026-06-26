@@ -113,6 +113,7 @@ impl IntoResponse for ApiError {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/auth/login", post(login))
+        .route("/auth/logout", post(logout))
         .route("/me", get(me))
         .route("/dashboard", get(dashboard))
         .route("/settings", get(get_settings).put(update_settings))
@@ -142,6 +143,16 @@ async fn login(
     } else {
         Err(ApiError::unauthorized())
     }
+}
+
+async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SimpleMessage>, ApiError> {
+    if let Some(token) = bearer_token(&headers) {
+        state.sessions.write().await.remove(&token);
+    }
+    Ok(Json(SimpleMessage::new("Chiqildi")))
 }
 
 async fn me(
@@ -321,18 +332,22 @@ async fn telegram_disconnect(
     Ok(Json(SimpleMessage::new("Userbot uzildi")))
 }
 
-async fn require_auth(headers: &HeaderMap, state: &AppState) -> Result<String, ApiError> {
-    let token = headers
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or_else(ApiError::unauthorized)?;
+        .map(|value| value.to_string())
+}
+
+async fn require_auth(headers: &HeaderMap, state: &AppState) -> Result<String, ApiError> {
+    let token = bearer_token(headers).ok_or_else(ApiError::unauthorized)?;
 
     state
         .sessions
         .read()
         .await
-        .get(token)
+        .get(&token)
         .cloned()
         .ok_or_else(ApiError::unauthorized)
 }

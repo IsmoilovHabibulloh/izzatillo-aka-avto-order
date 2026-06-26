@@ -202,71 +202,58 @@ impl TelegramService {
         Ok(client)
     }
 
-    pub async fn get_sponsored_messages(
-        &self,
-        client: &Client,
-        channel: &str,
-        keywords: &[String],
-    ) -> Result<Vec<AdResult>> {
-        let username = normalize_channel(channel)
-            .ok_or_else(|| anyhow!("Kanal username noto'g'ri: {channel}"))?;
-        let peer = client
-            .resolve_username(&username)
-            .await?
-            .ok_or_else(|| anyhow!("Kanal topilmadi: {channel}"))?;
-        let peer_ref = peer
-            .to_ref()
-            .await
-            .map_err(|err| anyhow!("Kanal ref olinmadi: {err}"))?
-            .ok_or_else(|| anyhow!("Kanal access_hash topilmadi: {channel}"))?;
+    /// Berilgan `query` (key) bo'yicha Telegram'da GLOBAL sponsored qidiruv qiladi
+    /// (`contacts.getSponsoredPeers`). Natija — qidiruvga mos sponsored kanallar.
+    /// Har bir topilgan kanal `AdResult` ko'rinishida qaytariladi: target_channel —
+    /// topilgan kanal, matched_keywords — qidirilgan key.
+    pub async fn get_sponsored_peers(&self, client: &Client, query: &str) -> Result<Vec<AdResult>> {
+        let query_trimmed = query.trim();
+        if query_trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let response = client
-            .invoke(&tl::functions::messages::GetSponsoredMessages {
-                peer: (&peer_ref).into(),
-                msg_id: None,
+            .invoke(&tl::functions::contacts::GetSponsoredPeers {
+                q: query_trimmed.to_string(),
             })
             .await
-            .with_context(|| format!("Telegram ads olinmadi: {channel}"))?;
+            .with_context(|| format!("Telegram sponsored qidiruv xatosi: {query_trimmed}"))?;
 
-        let channel_title = peer.name().map(ToOwned::to_owned);
-        let messages = match response {
-            tl::enums::messages::SponsoredMessages::Messages(messages) => messages.messages,
-            tl::enums::messages::SponsoredMessages::Empty => Vec::new(),
+        let data = match response {
+            tl::enums::contacts::SponsoredPeers::Peers(data) => data,
+            tl::enums::contacts::SponsoredPeers::Empty => return Ok(Vec::new()),
         };
 
+        let query_lc = query_trimmed.to_lowercase();
         let mut out = Vec::new();
-        for item in messages {
-            let ad = match item {
-                tl::enums::SponsoredMessage::Message(ad) => ad,
+
+        for peer in data.peers {
+            let tl::enums::SponsoredPeer::Peer(peer) = peer;
+            let Some((username, title)) = resolve_peer(&peer.peer, &data.chats, &data.users) else {
+                // username yo'q (link yasab bo'lmaydi) — o'tkazib yuboramiz.
+                continue;
             };
 
-            let matched_keywords = matched_keywords(&ad, keywords);
-            if !keywords.is_empty() && matched_keywords.is_empty() {
-                continue;
-            }
+            let username_lc = username.to_lowercase();
+            let url = format!("https://t.me/{username}");
+            let random_id_hex = to_hex(&peer.random_id);
+            // Barqaror fingerprint: bir xil key bir xil kanalni topsa, natija takrorlanmaydi.
+            let fingerprint = format!("{query_lc}:{username_lc}");
 
-            let random_id_hex = to_hex(&ad.random_id);
-            let target_channel = normalize_channel_ref(&ad.url);
-            let fingerprint = format!(
-                "{}:{}:{}",
-                username.to_lowercase(),
-                random_id_hex,
-                matched_keywords.join("|")
-            );
             out.push(AdResult {
                 id: uuid::Uuid::new_v4().to_string(),
                 fingerprint,
-                channel: username.clone(),
-                channel_title: channel_title.clone(),
-                target_channel,
-                matched_keywords,
-                title: ad.title,
-                message: ad.message,
-                url: ad.url,
-                button_text: ad.button_text,
-                sponsor_info: ad.sponsor_info,
-                additional_info: ad.additional_info,
-                recommended: ad.recommended,
+                channel: username_lc.clone(),
+                channel_title: title.clone(),
+                target_channel: Some(username_lc),
+                matched_keywords: vec![query_trimmed.to_string()],
+                title: title.unwrap_or_default(),
+                message: peer.additional_info.clone().unwrap_or_default(),
+                url,
+                button_text: String::new(),
+                sponsor_info: peer.sponsor_info,
+                additional_info: peer.additional_info,
+                recommended: false,
                 random_id_hex,
                 found_at: chrono::Utc::now(),
             });
@@ -309,13 +296,59 @@ impl TelegramService {
     }
 }
 
-fn normalize_channel(raw: &str) -> Option<String> {
-    let value = normalize_channel_ref(raw)?;
-    if value.starts_with('+') {
-        None
-    } else {
-        Some(value)
+/// Sponsored peer (Peer) ni topilgan chats/users ro'yxati orqali (username, title)
+/// ga aylantiradi. Username topilmasa None — chunki order linkini yasab bo'lmaydi.
+fn resolve_peer(
+    peer: &tl::enums::Peer,
+    chats: &[tl::enums::Chat],
+    users: &[tl::enums::User],
+) -> Option<(String, Option<String>)> {
+    match peer {
+        tl::enums::Peer::Channel(p) => {
+            for chat in chats {
+                if let tl::enums::Chat::Channel(c) = chat {
+                    if c.id == p.channel_id {
+                        return primary_username(c.username.as_deref(), c.usernames.as_deref())
+                            .map(|name| (name, Some(c.title.clone())));
+                    }
+                }
+            }
+            None
+        }
+        tl::enums::Peer::User(p) => {
+            for user in users {
+                if let tl::enums::User::User(u) = user {
+                    if u.id == p.user_id {
+                        return primary_username(u.username.as_deref(), u.usernames.as_deref())
+                            .map(|name| (name, u.first_name.clone()));
+                    }
+                }
+            }
+            None
+        }
+        tl::enums::Peer::Chat(_) => None,
     }
+}
+
+/// Asosiy username (yoki birinchi aktiv qo'shimcha username) ni qaytaradi.
+fn primary_username(
+    username: Option<&str>,
+    usernames: Option<&[tl::enums::Username]>,
+) -> Option<String> {
+    if let Some(value) = username {
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    if let Some(list) = usernames {
+        for entry in list {
+            let tl::enums::Username::Username(entry) = entry;
+            if entry.active && !entry.username.is_empty() {
+                return Some(entry.username.clone());
+            }
+        }
+    }
+    None
 }
 
 pub fn normalize_channel_ref(raw: &str) -> Option<String> {
@@ -343,32 +376,6 @@ pub fn normalize_channel_ref(raw: &str) -> Option<String> {
     } else {
         Some(value.to_lowercase())
     }
-}
-
-fn matched_keywords(ad: &tl::types::SponsoredMessage, keywords: &[String]) -> Vec<String> {
-    let haystack = format!(
-        "{}\n{}\n{}\n{}\n{}",
-        ad.title,
-        ad.message,
-        ad.url,
-        ad.sponsor_info.as_deref().unwrap_or_default(),
-        ad.additional_info.as_deref().unwrap_or_default()
-    )
-    .to_lowercase();
-
-    keywords
-        .iter()
-        .filter_map(|keyword| {
-            let clean = keyword.trim();
-            if clean.is_empty() {
-                None
-            } else if haystack.contains(&clean.to_lowercase()) {
-                Some(clean.to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
 }
 
 fn to_hex(bytes: &[u8]) -> String {

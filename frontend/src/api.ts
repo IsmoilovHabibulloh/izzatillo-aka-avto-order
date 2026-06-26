@@ -106,6 +106,15 @@ export type ScanResponse = {
   message: string;
 };
 
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 export async function apiFetch<T>(
   path: string,
   token: string | null,
@@ -119,15 +128,30 @@ export async function apiFetch<T>(
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(`/api${path}`, {
-    ...init,
-    headers
-  });
+  let response: Response;
+  try {
+    response = await fetch(`/api${path}`, { ...init, headers });
+  } catch {
+    throw new ApiError("Serverga ulanib bo'lmadi", 0);
+  }
+
   const raw = await response.text();
-  const data = raw ? JSON.parse(raw) : null;
+  let data: unknown = null;
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      // JSON bo'lmagan javob (masalan proxy HTML xatosi) — null qoldiramiz.
+      data = null;
+    }
+  }
 
   if (!response.ok) {
-    throw new Error(data?.error ?? `HTTP ${response.status}`);
+    const message =
+      (data && typeof data === 'object' && 'error' in data
+        ? String((data as { error: unknown }).error)
+        : null) ?? `HTTP ${response.status}`;
+    throw new ApiError(message, response.status);
   }
 
   return data as T;
