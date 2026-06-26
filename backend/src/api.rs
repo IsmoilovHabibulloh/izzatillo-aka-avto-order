@@ -190,7 +190,31 @@ async fn update_settings(
     Json(settings): Json<Settings>,
 ) -> Result<Json<Settings>, ApiError> {
     require_auth(&headers, &state).await?;
-    Ok(Json(state.store.update_settings(settings).await?))
+    let previous = state.store.settings().await;
+    let clean = state.store.update_settings(settings).await?;
+
+    if previous.enabled != clean.enabled {
+        let (title, message) = if clean.enabled {
+            (
+                "Skaner boshlandi",
+                format!(
+                    "Avtomatik skaner yoqildi. Umumiy interval: {} sekund.",
+                    clean.interval_seconds
+                ),
+            )
+        } else {
+            (
+                "Skaner to'xtatildi",
+                "Avtomatik skaner admin tomonidan to'xtatildi.".to_string(),
+            )
+        };
+        state
+            .store
+            .push_logs(vec![PanelLog::new("info", title, message)])
+            .await?;
+    }
+
+    Ok(Json(clean))
 }
 
 async fn get_results(
