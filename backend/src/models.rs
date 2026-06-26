@@ -198,6 +198,15 @@ pub struct RuntimeStatus {
     pub total_logs: usize,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SmmBalance {
+    pub configured: bool,
+    pub balance: Option<String>,
+    pub currency: Option<String>,
+    pub error: Option<String>,
+    pub checked_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct LoginRequest {
     pub username: String,
@@ -251,6 +260,7 @@ pub struct ScanResponse {
 pub struct DashboardResponse {
     pub settings: Settings,
     pub telegram: TelegramSettings,
+    pub smm_balance: SmmBalance,
     pub status: RuntimeStatus,
     pub results: Vec<AdResult>,
     pub logs: Vec<PanelLog>,

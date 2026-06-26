@@ -47,6 +47,7 @@ import {
   KeywordRule,
   Settings,
   PanelLog,
+  SmmBalance,
   TelegramAuthResponse,
   apiFetch
 } from './api';
@@ -69,6 +70,7 @@ function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [settings, setSettings] = useState<Settings>(emptySettings);
+  const [page, setPage] = useState<'panel' | 'logs'>('panel');
   const [tab, setTab] = useState(0);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -158,6 +160,24 @@ function App() {
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Saqlash xato');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setScannerEnabled = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const clean = await apiFetch<Settings>('/settings', token, {
+        method: 'PUT',
+        body: JSON.stringify({ ...settings, enabled })
+      });
+      setSettings(normalizeSettings(clean));
+      setNotice(enabled ? 'Skaner boshlandi' : 'Skaner to\'xtatildi');
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Skaner holatini o\'zgartirish xato');
     } finally {
       setBusy(false);
     }
@@ -424,6 +444,46 @@ function App() {
             ok={Boolean(settings.enabled)}
             label={settings.enabled ? `Har ${settings.interval_seconds}s` : 'Skaner o\'chiq'}
           />
+          <StatusChip
+            ok={!dashboard?.smm_balance.error && Boolean(dashboard?.smm_balance.configured)}
+            label={`Balans: ${formatBalance(dashboard?.smm_balance)}`}
+          />
+          <Button
+            color="inherit"
+            variant="contained"
+            onClick={() => setScannerEnabled(true)}
+            disabled={busy || settings.enabled}
+            startIcon={<Play size={18} />}
+            sx={{ bgcolor: 'rgba(255,255,255,0.18)', '&:hover': { bgcolor: 'rgba(255,255,255,0.26)' } }}
+          >
+            Boshlash
+          </Button>
+          <Button
+            color="inherit"
+            variant="outlined"
+            onClick={() => setScannerEnabled(false)}
+            disabled={busy || !settings.enabled}
+            startIcon={<CircleOff size={18} />}
+            sx={{ borderColor: 'rgba(255,255,255,0.5)' }}
+          >
+            To'xtatish
+          </Button>
+          <Button
+            color="inherit"
+            variant={page === 'panel' ? 'outlined' : 'text'}
+            onClick={() => setPage('panel')}
+            sx={{ borderColor: 'rgba(255,255,255,0.5)' }}
+          >
+            Panel
+          </Button>
+          <Button
+            color="inherit"
+            variant={page === 'logs' ? 'outlined' : 'text'}
+            onClick={() => setPage('logs')}
+            sx={{ borderColor: 'rgba(255,255,255,0.5)' }}
+          >
+            Loglar ({dashboard?.status.total_logs ?? 0})
+          </Button>
           <Tooltip title="Yangilash">
             <IconButton color="inherit" onClick={refresh} disabled={loading}>
               <RefreshCw size={20} />
@@ -451,84 +511,84 @@ function App() {
 
           <StatsBar dashboard={dashboard} loading={loading} />
 
-          <Paper sx={{ overflow: 'hidden' }}>
-            <Tabs
-              value={tab}
-              onChange={(_, value) => setTab(value)}
-              variant="scrollable"
-              scrollButtons="auto"
-              sx={{
-                borderBottom: 1,
-                borderColor: 'divider',
-                '& .MuiTab-root': { minHeight: 52, fontWeight: 800 }
-              }}
-            >
-              <Tab label="Sozlamalar" />
-              <Tab label="Userbot" />
-              <Tab label="Natijalar" />
-              <Tab label="Loglar" />
-            </Tabs>
+          {page === 'logs' ? (
+            <LogsPanel
+              logs={dashboard?.logs ?? []}
+              clearLogs={clearLogs}
+              busy={busy}
+            />
+          ) : (
+            <Paper sx={{ overflow: 'hidden' }}>
+              <Tabs
+                value={tab}
+                onChange={(_, value) => setTab(value)}
+                variant="scrollable"
+                scrollButtons="auto"
+                sx={{
+                  borderBottom: 1,
+                  borderColor: 'divider',
+                  '& .MuiTab-root': { minHeight: 52, fontWeight: 800 }
+                }}
+              >
+                <Tab label="Sozlamalar" />
+                <Tab label="Userbot" />
+                <Tab label="Natijalar" />
+              </Tabs>
 
-            <Box sx={{ p: { xs: 2, md: 3 } }}>
-              {tab === 0 && (
-                <SettingsPanel
-                  settings={settings}
-                  setSettings={setSettings}
-                  keywordInput={keywordInput}
-                  setKeywordInput={setKeywordInput}
-                  keywordIntervalInput={keywordIntervalInput}
-                  setKeywordIntervalInput={setKeywordIntervalInput}
-                  channelInput={channelInput}
-                  setChannelInput={setChannelInput}
-                  blacklistInput={blacklistInput}
-                  setBlacklistInput={setBlacklistInput}
-                  whitelistInput={whitelistInput}
-                  setWhitelistInput={setWhitelistInput}
-                  addKeywordRules={addKeywordRules}
-                  updateKeywordRule={updateKeywordRule}
-                  removeKeywordRule={removeKeywordRule}
-                  addListItem={addListItem}
-                  removeListItem={removeListItem}
-                  saveSettings={saveSettings}
-                  busy={busy}
-                />
-              )}
-              {tab === 1 && (
-                <TelegramPanel
-                  dashboard={dashboard}
-                  tgApiId={tgApiId}
-                  setTgApiId={setTgApiId}
-                  tgApiHash={tgApiHash}
-                  setTgApiHash={setTgApiHash}
-                  tgPhone={tgPhone}
-                  setTgPhone={setTgPhone}
-                  tgCode={tgCode}
-                  setTgCode={setTgCode}
-                  tgPassword={tgPassword}
-                  setTgPassword={setTgPassword}
-                  requestCode={requestCode}
-                  verifyTelegram={verifyTelegram}
-                  disconnectTelegram={disconnectTelegram}
-                  busy={busy}
-                />
-              )}
-              {tab === 2 && (
-                <ResultsPanel
-                  results={dashboard?.results ?? []}
-                  runScan={runScan}
-                  clearResults={clearResults}
-                  busy={busy}
-                />
-              )}
-              {tab === 3 && (
-                <LogsPanel
-                  logs={dashboard?.logs ?? []}
-                  clearLogs={clearLogs}
-                  busy={busy}
-                />
-              )}
-            </Box>
-          </Paper>
+              <Box sx={{ p: { xs: 2, md: 3 } }}>
+                {tab === 0 && (
+                  <SettingsPanel
+                    settings={settings}
+                    setSettings={setSettings}
+                    keywordInput={keywordInput}
+                    setKeywordInput={setKeywordInput}
+                    keywordIntervalInput={keywordIntervalInput}
+                    setKeywordIntervalInput={setKeywordIntervalInput}
+                    channelInput={channelInput}
+                    setChannelInput={setChannelInput}
+                    blacklistInput={blacklistInput}
+                    setBlacklistInput={setBlacklistInput}
+                    whitelistInput={whitelistInput}
+                    setWhitelistInput={setWhitelistInput}
+                    addKeywordRules={addKeywordRules}
+                    updateKeywordRule={updateKeywordRule}
+                    removeKeywordRule={removeKeywordRule}
+                    addListItem={addListItem}
+                    removeListItem={removeListItem}
+                    saveSettings={saveSettings}
+                    busy={busy}
+                  />
+                )}
+                {tab === 1 && (
+                  <TelegramPanel
+                    dashboard={dashboard}
+                    tgApiId={tgApiId}
+                    setTgApiId={setTgApiId}
+                    tgApiHash={tgApiHash}
+                    setTgApiHash={setTgApiHash}
+                    tgPhone={tgPhone}
+                    setTgPhone={setTgPhone}
+                    tgCode={tgCode}
+                    setTgCode={setTgCode}
+                    tgPassword={tgPassword}
+                    setTgPassword={setTgPassword}
+                    requestCode={requestCode}
+                    verifyTelegram={verifyTelegram}
+                    disconnectTelegram={disconnectTelegram}
+                    busy={busy}
+                  />
+                )}
+                {tab === 2 && (
+                  <ResultsPanel
+                    results={dashboard?.results ?? []}
+                    runScan={runScan}
+                    clearResults={clearResults}
+                    busy={busy}
+                  />
+                )}
+              </Box>
+            </Paper>
+          )}
         </Stack>
       </Container>
     </Box>
@@ -549,18 +609,19 @@ function StatusChip({ ok, label }: { ok: boolean; label: string }) {
 function StatsBar({ dashboard, loading }: { dashboard: Dashboard | null; loading: boolean }) {
   const status = dashboard?.status;
   const items = [
+    ['API balans', formatBalance(dashboard?.smm_balance)],
     ['Natijalar', String(status?.total_results ?? 0)],
     ['Loglar', String(status?.total_logs ?? 0)],
     ['Oxirgi scan', formatDate(status?.last_run_at)],
     ['Keyingi scan', formatDate(status?.next_run_at)],
-    ['Holat', status?.scanning ? 'Ishlayapti' : loading ? 'Yuklanmoqda' : 'Tayyor']
+    ['Holat', !dashboard?.settings.enabled ? 'To\'xtagan' : status?.scanning ? 'Ishlayapti' : loading ? 'Yuklanmoqda' : 'Tayyor']
   ];
 
   return (
     <Box
       sx={{
         display: 'grid',
-        gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(5, 1fr)' },
+        gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(6, 1fr)' },
         gap: 1.5
       }}
     >
@@ -664,7 +725,7 @@ function SettingsPanel(props: SettingsPanelProps) {
           fullWidth
         />
         <TextField
-          label="Maksimal natija"
+          label="Natija tarixi limiti"
           type="number"
           value={settings.max_results}
           onChange={(event) =>
@@ -687,7 +748,7 @@ function SettingsPanel(props: SettingsPanelProps) {
       />
 
       <ListEditor
-        title="Kanallar"
+        title="Tekshiriladigan kanallar"
         placeholder="@kanal yoki t.me/kanal"
         value={channelInput}
         onChange={setChannelInput}
@@ -1147,85 +1208,92 @@ function LogsPanel({
   busy: boolean;
 }) {
   return (
-    <Stack spacing={2}>
-      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ justifyContent: 'space-between' }}>
-        <Typography variant="h6">Admin log</Typography>
-        <Button variant="outlined" color="error" onClick={clearLogs} disabled={busy} startIcon={<Trash2 size={18} />}>
-          Tozalash
-        </Button>
-      </Stack>
+    <Paper sx={{ p: { xs: 2, md: 3 } }}>
+      <Stack spacing={2}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ justifyContent: 'space-between' }}>
+          <Box>
+            <Typography variant="h5">Loglar</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Scan, oq/qora ro'yxat qarori va SMMMAIN order javoblari
+            </Typography>
+          </Box>
+          <Button variant="outlined" color="error" onClick={clearLogs} disabled={busy} startIcon={<Trash2 size={18} />}>
+            Tozalash
+          </Button>
+        </Stack>
 
-      <Box sx={{ overflowX: 'auto' }}>
-        <Table sx={{ minWidth: 1320 }}>
-          <TableHead>
-            <TableRow>
-              <TableCell>Vaqt</TableCell>
-              <TableCell>Holat</TableCell>
-              <TableCell>Xabar</TableCell>
-              <TableCell>Key</TableCell>
-              <TableCell>Source</TableCell>
-              <TableCell>Target</TableCell>
-              <TableCell>Order</TableCell>
-              <TableCell>Javob</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {logs.map((log) => (
-              <TableRow key={log.id} hover>
-                <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(log.created_at)}</TableCell>
-                <TableCell>
-                  <Chip
-                    size="small"
-                    label={log.level}
-                    color={log.level === 'success' ? 'secondary' : log.level === 'error' ? 'error' : 'default'}
-                  />
-                </TableCell>
-                <TableCell className="text-clamp" sx={{ maxWidth: 360 }}>
-                  <Typography sx={{ fontWeight: 800 }}>{log.title}</Typography>
-                  <Typography variant="body2">{log.message}</Typography>
-                  {log.ad_url && (
-                    <Link href={log.ad_url} target="_blank" rel="noreferrer" variant="caption">
-                      {log.ad_url}
-                    </Link>
-                  )}
-                </TableCell>
-                <TableCell className="text-clamp">{log.keyword || '-'}</TableCell>
-                <TableCell className="text-clamp">{log.source_channel || '-'}</TableCell>
-                <TableCell className="text-clamp">{log.target_channel || '-'}</TableCell>
-                <TableCell className="text-clamp" sx={{ maxWidth: 240 }}>
-                  <Typography variant="body2">service: {log.service_id || '-'}</Typography>
-                  <Typography variant="body2">quality: {log.quantity || '-'}</Typography>
-                  <Typography variant="body2">order: {log.order_id || '-'}</Typography>
-                  {log.order_link && (
-                    <Link href={log.order_link} target="_blank" rel="noreferrer" variant="caption">
-                      {log.order_link}
-                    </Link>
-                  )}
-                </TableCell>
-                <TableCell className="text-clamp" sx={{ maxWidth: 300 }}>
-                  {log.raw_response || '-'}
-                </TableCell>
-              </TableRow>
-            ))}
-            {!logs.length && (
+        <Box sx={{ overflowX: 'auto' }}>
+          <Table sx={{ minWidth: 1320 }}>
+            <TableHead>
               <TableRow>
-                <TableCell colSpan={8}>
-                  <Box
-                    sx={{
-                      p: 4,
-                      textAlign: 'center',
-                      bgcolor: (theme) => alpha(theme.palette.primary.main, 0.04)
-                    }}
-                  >
-                    <Typography color="text.secondary">Log yo'q</Typography>
-                  </Box>
-                </TableCell>
+                <TableCell>Vaqt</TableCell>
+                <TableCell>Holat</TableCell>
+                <TableCell>Xabar</TableCell>
+                <TableCell>Key</TableCell>
+                <TableCell>Source</TableCell>
+                <TableCell>Target</TableCell>
+                <TableCell>Order</TableCell>
+                <TableCell>Javob</TableCell>
               </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </Box>
-    </Stack>
+            </TableHead>
+            <TableBody>
+              {logs.map((log) => (
+                <TableRow key={log.id} hover>
+                  <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(log.created_at)}</TableCell>
+                  <TableCell>
+                    <Chip
+                      size="small"
+                      label={log.level}
+                      color={log.level === 'success' ? 'secondary' : log.level === 'error' ? 'error' : 'default'}
+                    />
+                  </TableCell>
+                  <TableCell className="text-clamp" sx={{ maxWidth: 360 }}>
+                    <Typography sx={{ fontWeight: 800 }}>{log.title}</Typography>
+                    <Typography variant="body2">{log.message}</Typography>
+                    {log.ad_url && (
+                      <Link href={log.ad_url} target="_blank" rel="noreferrer" variant="caption">
+                        {log.ad_url}
+                      </Link>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-clamp">{log.keyword || '-'}</TableCell>
+                  <TableCell className="text-clamp">{log.source_channel || '-'}</TableCell>
+                  <TableCell className="text-clamp">{log.target_channel || '-'}</TableCell>
+                  <TableCell className="text-clamp" sx={{ maxWidth: 240 }}>
+                    <Typography variant="body2">service: {log.service_id || '-'}</Typography>
+                    <Typography variant="body2">quality: {log.quantity || '-'}</Typography>
+                    <Typography variant="body2">order: {log.order_id || '-'}</Typography>
+                    {log.order_link && (
+                      <Link href={log.order_link} target="_blank" rel="noreferrer" variant="caption">
+                        {log.order_link}
+                      </Link>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-clamp" sx={{ maxWidth: 300 }}>
+                    {log.raw_response || '-'}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {!logs.length && (
+                <TableRow>
+                  <TableCell colSpan={8}>
+                    <Box
+                      sx={{
+                        p: 4,
+                        textAlign: 'center',
+                        bgcolor: (theme) => alpha(theme.palette.primary.main, 0.04)
+                      }}
+                    >
+                      <Typography color="text.secondary">Log yo'q</Typography>
+                    </Box>
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </Box>
+      </Stack>
+    </Paper>
   );
 }
 
@@ -1238,6 +1306,14 @@ function formatDate(value?: string | null) {
     minute: '2-digit',
     second: '2-digit'
   });
+}
+
+function formatBalance(balance?: SmmBalance | null) {
+  if (!balance) return '-';
+  if (balance.error) return 'xato';
+  if (!balance.configured) return 'ulanmagan';
+  if (!balance.balance) return '-';
+  return [balance.balance, balance.currency].filter(Boolean).join(' ');
 }
 
 function formatChannel(value?: string | null) {

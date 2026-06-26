@@ -16,6 +16,12 @@ pub struct SmmOrderOutcome {
     pub raw_response: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct SmmBalanceOutcome {
+    pub balance: Option<String>,
+    pub currency: Option<String>,
+}
+
 impl SmmMainService {
     pub fn new(api_key: String, api_url: String, service_id: u64) -> Self {
         Self {
@@ -78,6 +84,43 @@ impl SmmMainService {
         Ok(SmmOrderOutcome {
             order_id,
             raw_response,
+        })
+    }
+
+    pub async fn balance(&self) -> Result<SmmBalanceOutcome> {
+        if !self.is_configured() {
+            bail!("SMMMAIN_API_KEY .env ichida kiritilmagan");
+        }
+
+        let form = [("key", self.api_key.trim()), ("action", "balance")];
+        let response = self
+            .http
+            .post(self.api_url.trim())
+            .form(&form)
+            .send()
+            .await
+            .context("SMMMAIN balans API ga ulanishda xatolik")?;
+
+        let status = response.status();
+        let raw_response = response
+            .text()
+            .await
+            .context("SMMMAIN balans javobini o'qib bo'lmadi")?;
+
+        if !status.is_success() {
+            bail!("SMMMAIN balans HTTP {status}: {raw_response}");
+        }
+
+        let value = serde_json::from_str::<Value>(&raw_response)
+            .with_context(|| format!("SMMMAIN balans JSON javobi tushunarsiz: {raw_response}"))?;
+
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(anyhow!("SMMMAIN balans xato qaytardi: {error}"));
+        }
+
+        Ok(SmmBalanceOutcome {
+            balance: value.get("balance").map(value_to_string),
+            currency: value.get("currency").map(value_to_string),
         })
     }
 }

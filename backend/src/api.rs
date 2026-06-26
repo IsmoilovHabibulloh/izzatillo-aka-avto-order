@@ -1,6 +1,6 @@
 use crate::models::{
     DashboardResponse, ErrorResponse, LoginRequest, LoginResponse, MeResponse, PanelLog,
-    RuntimeStatus, Settings, TelegramRequestCode, TelegramSettings, TelegramVerifyCode,
+    RuntimeStatus, Settings, SmmBalance, TelegramRequestCode, TelegramSettings, TelegramVerifyCode,
 };
 use crate::scanner;
 use crate::smmmain::SmmMainService;
@@ -110,6 +110,7 @@ pub fn router(state: AppState) -> Router {
         .route("/settings", get(get_settings).put(update_settings))
         .route("/results", get(get_results).delete(clear_results))
         .route("/logs", get(get_logs).delete(clear_logs))
+        .route("/smmmain/balance", get(smmmain_balance))
         .route("/status", get(status))
         .route("/scan/run", post(run_scan))
         .route("/telegram/request-code", post(telegram_request_code))
@@ -152,10 +153,19 @@ async fn dashboard(
     Ok(Json(DashboardResponse {
         settings: snapshot.settings,
         telegram: public_telegram_settings(snapshot.telegram),
+        smm_balance: public_smm_balance(&state).await,
         status: state.status().await,
         results: snapshot.results,
         logs: snapshot.logs,
     }))
+}
+
+async fn smmmain_balance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SmmBalance>, ApiError> {
+    require_auth(&headers, &state).await?;
+    Ok(Json(public_smm_balance(&state).await))
 }
 
 async fn get_settings(
@@ -300,6 +310,36 @@ fn public_telegram_settings(mut settings: TelegramSettings) -> TelegramSettings 
         settings.api_hash = Some("configured".to_string());
     }
     settings
+}
+
+async fn public_smm_balance(state: &AppState) -> SmmBalance {
+    let checked_at = Utc::now();
+    if !state.smmmain.is_configured() {
+        return SmmBalance {
+            configured: false,
+            balance: None,
+            currency: None,
+            error: Some("SMMMAIN_API_KEY kiritilmagan".to_string()),
+            checked_at,
+        };
+    }
+
+    match state.smmmain.balance().await {
+        Ok(outcome) => SmmBalance {
+            configured: true,
+            balance: outcome.balance,
+            currency: outcome.currency,
+            error: None,
+            checked_at,
+        },
+        Err(err) => SmmBalance {
+            configured: true,
+            balance: None,
+            currency: None,
+            error: Some(err.to_string()),
+            checked_at,
+        },
+    }
 }
 
 fn next_keyword_run_at(settings: &Settings) -> Option<DateTime<Utc>> {

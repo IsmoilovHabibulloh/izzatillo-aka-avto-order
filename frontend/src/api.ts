@@ -70,9 +70,18 @@ export type PanelLog = {
   raw_response?: string | null;
 };
 
+export type SmmBalance = {
+  configured: boolean;
+  balance?: string | null;
+  currency?: string | null;
+  error?: string | null;
+  checked_at: string;
+};
+
 export type Dashboard = {
   settings: Settings;
   telegram: TelegramSettings;
+  smm_balance: SmmBalance;
   status: RuntimeStatus;
   results: AdResult[];
   logs: PanelLog[];
