@@ -1789,43 +1789,54 @@ function LogsPanel({
                 <TableCell>Source</TableCell>
                 <TableCell>Target</TableCell>
                 <TableCell>Order</TableCell>
-                <TableCell>Javob</TableCell>
+                <TableCell>Sabab / Natija</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {logs.map((log) => (
-                <TableRow key={log.id} hover>
-                  <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(log.created_at)}</TableCell>
-                  <TableCell>
-                    <LevelChip level={log.level} />
-                  </TableCell>
-                  <TableCell className="text-clamp" sx={{ maxWidth: 360 }}>
-                    <Typography sx={{ fontWeight: 800 }}>{log.title}</Typography>
-                    <Typography variant="body2">{log.message}</Typography>
-                    {log.ad_url && (
-                      <Link href={log.ad_url} target="_blank" rel="noreferrer" variant="caption">
-                        {log.ad_url}
-                      </Link>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-clamp">{log.keyword || '-'}</TableCell>
-                  <TableCell className="text-clamp">{log.source_channel || '-'}</TableCell>
-                  <TableCell className="text-clamp">{log.target_channel || '-'}</TableCell>
-                  <TableCell className="text-clamp" sx={{ maxWidth: 240 }}>
-                    <Typography variant="body2">service: {log.service_id || '-'}</Typography>
-                    <Typography variant="body2">quality: {log.quantity || '-'}</Typography>
-                    <Typography variant="body2">order: {log.order_id || '-'}</Typography>
-                    {log.order_link && (
-                      <Link href={log.order_link} target="_blank" rel="noreferrer" variant="caption">
-                        {log.order_link}
-                      </Link>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-clamp" sx={{ maxWidth: 300 }}>
-                    {log.raw_response || '-'}
-                  </TableCell>
-                </TableRow>
-              ))}
+              {logs.map((log) => {
+                const hasOrder = Boolean(log.service_id || log.quantity || log.order_id);
+                return (
+                  <TableRow key={log.id} hover>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(log.created_at)}</TableCell>
+                    <TableCell>
+                      <LevelChip level={log.level} />
+                    </TableCell>
+                    <TableCell className="text-clamp" sx={{ maxWidth: 360 }}>
+                      <Typography sx={{ fontWeight: 800 }}>{log.title}</Typography>
+                      <Typography variant="body2">{log.message}</Typography>
+                      {log.ad_url && (
+                        <Link href={log.ad_url} target="_blank" rel="noreferrer" variant="caption">
+                          {log.ad_url}
+                        </Link>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-clamp">{log.keyword || '—'}</TableCell>
+                    <TableCell className="text-clamp">{log.source_channel || '—'}</TableCell>
+                    <TableCell className="text-clamp">{log.target_channel || '—'}</TableCell>
+                    <TableCell className="text-clamp" sx={{ maxWidth: 240 }}>
+                      {hasOrder ? (
+                        <>
+                          <Typography variant="body2">service: {log.service_id ?? '-'}</Typography>
+                          <Typography variant="body2">soni: {log.quantity ?? '-'}</Typography>
+                          <Typography variant="body2">order: {log.order_id ?? '-'}</Typography>
+                          {log.order_link && (
+                            <Link href={log.order_link} target="_blank" rel="noreferrer" variant="caption">
+                              {log.order_link}
+                            </Link>
+                          )}
+                        </>
+                      ) : (
+                        <Typography variant="body2" color="text.secondary">
+                          order yo'q
+                        </Typography>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-clamp" sx={{ maxWidth: 300 }}>
+                      {log.raw_response || '—'}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
               {!logs.length && (
                 <TableRow>
                   <TableCell colSpan={8}>

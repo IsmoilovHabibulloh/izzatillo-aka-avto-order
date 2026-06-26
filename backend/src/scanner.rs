@@ -148,16 +148,21 @@ async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
     }
 
     let mut collected = Vec::new();
-    let mut scan_logs = vec![PanelLog::new(
+    let mut start_log = PanelLog::new(
         "info",
         "Scan boshlandi",
         format!(
-            "{} ta key bo'yicha global qidiruv: {}. Akkauntlar: {}",
-            keywords.len(),
-            keywords.join(", "),
-            accounts.len()
+            "{} ta key bo'yicha global qidiruv boshlandi.",
+            keywords.len()
         ),
-    )];
+    );
+    start_log.keyword = Some(keywords.join(", "));
+    start_log.source_channel = Some("Global qidiruv".to_string());
+    start_log.raw_response = Some(format!(
+        "{} ta akkaunt navbatda (round-robin)",
+        accounts.len()
+    ));
+    let mut scan_logs = vec![start_log];
 
     for query in &keywords {
         // Har key uchun navbatdagi (round-robin) sog'lom akkauntni tanlaymiz.
@@ -171,6 +176,9 @@ async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
                     format!("'{query}' uchun bo'sh (limitsiz) akkaunt yo'q, o'tkazib yuborildi."),
                 );
                 log.keyword = Some(query.clone());
+                log.source_channel = Some("Global qidiruv".to_string());
+                log.raw_response =
+                    Some("Barcha akkauntlar limitda yoki ulanmagan".to_string());
                 scan_logs.push(log);
                 break;
             }
@@ -188,15 +196,15 @@ async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
             let client = match state.telegram.ensure_account_client(&account.id, api_id).await {
                 Ok(client) => client,
                 Err(err) => {
+                    let label = account.label.clone().unwrap_or_else(|| account.id.clone());
                     let mut log = PanelLog::new(
                         "warning",
                         "Akkaunt ulanmadi",
-                        format!(
-                            "{} akkaunt ulanmadi: {err}",
-                            account.label.clone().unwrap_or_else(|| account.id.clone())
-                        ),
+                        format!("{label} akkaunt ulanmadi, keyingisiga o'tildi."),
                     );
                     log.keyword = Some(query.clone());
+                    log.source_channel = Some(label);
+                    log.raw_response = Some(err.to_string());
                     scan_logs.push(log);
                     continue;
                 }
@@ -221,6 +229,8 @@ async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
                             ),
                         );
                         log.keyword = Some(query.clone());
+                        log.source_channel = Some(label);
+                        log.raw_response = Some(format!("{secs} soniya dam oladi (FLOOD_WAIT)"));
                         scan_logs.push(log);
                         continue; // keyingi akkaunt bilan shu keyni qayta sinaymiz
                     }
@@ -230,9 +240,12 @@ async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
                     let mut log = PanelLog::new(
                         "error",
                         "Qidiruvda xato",
-                        format!("'{query}' key bo'yicha qidiruvda xato: {err}"),
+                        format!("'{query}' key bo'yicha qidiruvda xato."),
                     );
                     log.keyword = Some(query.clone());
+                    log.source_channel =
+                        Some(account.label.clone().unwrap_or_else(|| account.id.clone()));
+                    log.raw_response = Some(err.to_string());
                     scan_logs.push(log);
                     break; // limit emas — bu keyni o'tkazamiz
                 }
@@ -266,15 +279,15 @@ async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
         ));
     }
 
-    scan_logs.push(PanelLog::new(
+    let mut end_log = PanelLog::new(
         "success",
         "Scan yakunlandi",
-        format!(
-            "{} ta key bo'yicha qidirildi. {} ta yangi natija topildi.",
-            keywords.len(),
-            added_items.len()
-        ),
-    ));
+        format!("{} ta key bo'yicha qidirildi.", keywords.len()),
+    );
+    end_log.keyword = Some(keywords.join(", "));
+    end_log.source_channel = Some("Global qidiruv".to_string());
+    end_log.raw_response = Some(format!("{} ta yangi natija topildi", added_items.len()));
+    scan_logs.push(end_log);
     state.store.push_logs(scan_logs).await?;
 
     Ok(ScanResponse {

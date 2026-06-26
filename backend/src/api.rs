@@ -248,10 +248,14 @@ async fn update_settings(
                 "Avtomatik skaner admin tomonidan to'xtatildi.".to_string(),
             )
         };
-        state
-            .store
-            .push_logs(vec![PanelLog::new("info", title, message)])
-            .await?;
+        let mut log = PanelLog::new("info", title, message);
+        log.source_channel = Some("Admin panel".to_string());
+        log.raw_response = Some(if clean.enabled {
+            format!("Interval: {} sekund", clean.interval_seconds)
+        } else {
+            "Admin to'xtatdi".to_string()
+        });
+        state.store.push_logs(vec![log]).await?;
     }
 
     Ok(Json(clean))
