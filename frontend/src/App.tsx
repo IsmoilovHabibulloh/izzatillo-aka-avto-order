@@ -442,7 +442,7 @@ function App() {
           />
           <StatusChip
             ok={Boolean(settings.enabled)}
-            label={settings.enabled ? `Har ${settings.interval_seconds}s` : 'Skaner o\'chiq'}
+            label={settings.enabled ? `Skaner yoqilgan: har ${settings.interval_seconds}s` : 'Skaner to\'xtagan'}
           />
           <StatusChip
             ok={!dashboard?.smm_balance.error && Boolean(dashboard?.smm_balance.configured)}
@@ -614,7 +614,7 @@ function StatsBar({ dashboard, loading }: { dashboard: Dashboard | null; loading
     ['Loglar', String(status?.total_logs ?? 0)],
     ['Oxirgi scan', formatDate(status?.last_run_at)],
     ['Keyingi scan', formatDate(status?.next_run_at)],
-    ['Holat', !dashboard?.settings.enabled ? 'To\'xtagan' : status?.scanning ? 'Ishlayapti' : loading ? 'Yuklanmoqda' : 'Tayyor']
+    ['Holat', !dashboard?.settings.enabled ? 'To\'xtagan' : status?.scanning ? 'Tekshiryapti' : loading ? 'Yuklanmoqda' : 'Yoqilgan']
   ];
 
   return (
@@ -701,7 +701,7 @@ function SettingsPanel(props: SettingsPanelProps) {
                 onChange={(event) => setSettings((current) => ({ ...current, enabled: event.target.checked }))}
               />
             }
-            label={settings.enabled ? 'Skaner yoqilgan' : 'Skaner o\'chiq'}
+            label={settings.enabled ? 'Avto skaner yoqilgan' : 'Avto skaner to\'xtagan'}
           />
         </Paper>
         <TextField
