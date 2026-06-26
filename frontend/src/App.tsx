@@ -28,7 +28,7 @@ import {
   Typography,
   useMediaQuery
 } from '@mui/material';
-import { alpha, useTheme } from '@mui/material/styles';
+import { alpha, useTheme, type Theme } from '@mui/material/styles';
 import {
   CircleCheck,
   CircleOff,
@@ -589,6 +589,8 @@ function App() {
               {tab === 2 && (
                 <ResultsPanel
                   results={dashboard?.results ?? []}
+                  whitelist={dashboard?.settings.whitelist_channels ?? []}
+                  blacklist={dashboard?.settings.blacklist_channels ?? []}
                   runScan={runScan}
                   clearResults={clearResults}
                   busy={busy}
@@ -1527,12 +1529,16 @@ function AccountsPanel({
 
 function ResultsPanel({
   results,
+  whitelist,
+  blacklist,
   runScan,
   clearResults,
   busy,
   isMobile
 }: {
   results: AdResult[];
+  whitelist: string[];
+  blacklist: string[];
   runScan: () => void;
   clearResults: () => void;
   busy: boolean;
@@ -1547,7 +1553,21 @@ function ResultsPanel({
         spacing={1}
         sx={{ justifyContent: 'space-between', alignItems: { sm: 'center' } }}
       >
-        <Typography variant="h6">Topilgan ads ({sorted.length})</Typography>
+        <Stack spacing={0.75}>
+          <Typography variant="h6">Topilgan ads ({sorted.length})</Typography>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
+            <Chip
+              size="small"
+              label="Oq ro'yxat"
+              sx={{ bgcolor: (theme) => alpha(theme.palette.success.main, 0.18), fontWeight: 700 }}
+            />
+            <Chip
+              size="small"
+              label="Qora ro'yxat → order"
+              sx={{ bgcolor: (theme) => alpha(theme.palette.error.main, 0.16), fontWeight: 700 }}
+            />
+          </Stack>
+        </Stack>
         <Stack direction="row" spacing={1}>
           <Button variant="contained" onClick={runScan} disabled={busy} startIcon={<Play size={18} />} sx={{ flex: { xs: 1, sm: 'initial' } }}>
             Hozir tekshirish
@@ -1568,7 +1588,7 @@ function ResultsPanel({
       {isMobile ? (
         <Stack spacing={1.25}>
           {sorted.map((item) => (
-            <ResultCard key={item.id} item={item} />
+            <ResultCard key={item.id} item={item} tone={classifyResult(item, whitelist, blacklist)} />
           ))}
           {!sorted.length && <EmptyHint text="Natija yo'q" />}
         </Stack>
@@ -1591,7 +1611,7 @@ function ResultsPanel({
             </TableHead>
             <TableBody>
               {sorted.map((item) => (
-                <TableRow key={item.id} hover>
+                <TableRow key={item.id} hover sx={rowToneSx(classifyResult(item, whitelist, blacklist))}>
                   <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(item.found_at)}</TableCell>
                   <TableCell className="text-clamp">
                     <Typography sx={{ fontWeight: 800 }}>{item.channel_title || item.channel}</Typography>
@@ -1648,9 +1668,22 @@ function ResultsPanel({
   );
 }
 
-function ResultCard({ item }: { item: AdResult }) {
+function ResultCard({ item, tone }: { item: AdResult; tone: Tone }) {
   return (
-    <Paper variant="outlined" sx={{ p: 1.5 }}>
+    <Paper
+      variant="outlined"
+      sx={(theme) => ({
+        p: 1.5,
+        ...(tone === 'white' && {
+          borderLeft: `4px solid ${theme.palette.success.main}`,
+          bgcolor: alpha(theme.palette.success.main, 0.1)
+        }),
+        ...(tone === 'black' && {
+          borderLeft: `4px solid ${theme.palette.error.main}`,
+          bgcolor: alpha(theme.palette.error.main, 0.09)
+        })
+      })}
+    >
       <Stack spacing={0.75}>
         <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 1 }}>
           <Box sx={{ minWidth: 0 }}>
@@ -1898,6 +1931,72 @@ function EmptyHint({ text }: { text: string }) {
       <Typography color="text.secondary">{text}</Typography>
     </Box>
   );
+}
+
+type Tone = 'white' | 'black' | null;
+
+// Backenddagi normalize_channel_ref bilan bir xil: kanal username'ini ajratib oladi.
+function normalizeChannelRef(raw?: string | null): string | null {
+  if (!raw) return null;
+  let value = raw.trim().replace(/^@+/, '').trim();
+  for (const prefix of [
+    'https://t.me/',
+    'http://t.me/',
+    't.me/',
+    'https://telegram.me/',
+    'telegram.me/'
+  ]) {
+    if (value.startsWith(prefix)) value = value.slice(prefix.length);
+  }
+  value = value.split(/[?/#]/)[0].replace(/^@+/, '').trim();
+  return value ? value.toLowerCase() : null;
+}
+
+// Natija oq ro'yxatda bo'lsa 'white', qora ro'yxatda bo'lsa 'black' (oq ustun), aks holda null.
+function classifyResult(item: AdResult, whitelist: string[], blacklist: string[]): Tone {
+  const candidates = new Set<string>();
+  const target = normalizeChannelRef(item.target_channel);
+  if (target) candidates.add(target);
+  const url = normalizeChannelRef(item.url);
+  if (url) candidates.add(url);
+
+  const inList = (list: string[]) =>
+    list.some((raw) => {
+      const n = normalizeChannelRef(raw);
+      return n != null && candidates.has(n);
+    });
+
+  if (inList(whitelist)) return 'white';
+  if (inList(blacklist)) return 'black';
+  return null;
+}
+
+function rowToneSx(tone: Tone) {
+  if (tone === 'white') {
+    return {
+      bgcolor: (theme: Theme) => alpha(theme.palette.success.main, 0.16),
+      '&:hover': {
+        bgcolor: (theme: Theme) => alpha(theme.palette.success.main, 0.24)
+      },
+      '& td:first-of-type': {
+        borderLeft: (theme: Theme) =>
+          `4px solid ${theme.palette.success.main}`
+      }
+    };
+  }
+  if (tone === 'black') {
+    return {
+      bgcolor: (theme: Theme) => alpha(theme.palette.error.main, 0.14),
+      '&:hover': {
+        bgcolor: (theme: Theme) => alpha(theme.palette.error.main, 0.22)
+      },
+      '& td:first-of-type': {
+        borderLeft: (theme: Theme) =>
+          `4px solid ${theme.palette.error.main}`
+      }
+    };
+  }
+  return {};
 }
 
 function formatDate(value?: string | null) {
