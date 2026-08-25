@@ -6,6 +6,7 @@ mod store;
 mod telegram;
 
 use crate::api::{AppState, RuntimeInfo};
+use crate::models::DEFAULT_SMMMAIN_SERVICE_ID;
 use crate::smmmain::SmmMainService;
 use crate::store::Store;
 use crate::telegram::TelegramService;
@@ -43,7 +44,7 @@ async fn main() -> Result<()> {
     let app_state = AppState {
         store,
         telegram: Arc::new(TelegramService::new(session_path)),
-        smmmain: Arc::new(SmmMainService::new(smmmain_api_key, smmmain_api_url, 875)),
+        smmmain: Arc::new(SmmMainService::new(smmmain_api_key, smmmain_api_url, DEFAULT_SMMMAIN_SERVICE_ID)),
         sessions: Arc::new(RwLock::new(HashMap::new())),
         runtime: Arc::new(RwLock::new(RuntimeInfo::default())),
         rr: Arc::new(AtomicUsize::new(0)),

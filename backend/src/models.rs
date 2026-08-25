@@ -2,7 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-pub const DEFAULT_SMMMAIN_SERVICE_ID: u64 = 875;
+pub const DEFAULT_SMMMAIN_SERVICE_ID: u64 = 39;
+pub const LEGACY_SMMMAIN_SERVICE_ID: u64 = 875;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {

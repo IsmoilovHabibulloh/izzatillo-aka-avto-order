@@ -1,5 +1,5 @@
 use crate::models::{
-    AdResult, DEFAULT_SMMMAIN_SERVICE_ID, KeywordRule, OrderRecord, PanelLog, PersistedState,
+    AdResult, DEFAULT_SMMMAIN_SERVICE_ID, KeywordRule, LEGACY_SMMMAIN_SERVICE_ID, OrderRecord, PanelLog, PersistedState,
     Settings, TelegramAccount, TelegramSettings,
 };
 use anyhow::{Context, Result};
@@ -325,7 +325,7 @@ fn normalize_keyword_rules(
 
         rule.interval_seconds = rule.interval_seconds.clamp(2, 86_400);
         rule.order_quantity = rule.order_quantity.clamp(1, 1_000_000);
-        if rule.service_id == 0 {
+        if rule.service_id == 0 || rule.service_id == LEGACY_SMMMAIN_SERVICE_ID {
             rule.service_id = DEFAULT_SMMMAIN_SERVICE_ID;
         }
         if rule.enabled {
