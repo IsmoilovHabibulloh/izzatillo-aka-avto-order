@@ -546,6 +546,7 @@ function App() {
               <Tab label="Userbot" />
               <Tab label="Natijalar" />
               <Tab label={`Loglar (${dashboard?.status.total_logs ?? 0})`} />
+              <Tab label="Qora kanal" />
             </Tabs>
 
             <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 } }}>
@@ -603,11 +604,138 @@ function App() {
               {tab === 3 && (
                 <LogsPanel logs={dashboard?.logs ?? []} clearLogs={clearLogs} busy={busy} isMobile={isMobile} />
               )}
+              {tab === 4 && <BlacklistAddPanel token={token} />}
             </Box>
           </Paper>
         </Stack>
       </Container>
     </Box>
+  );
+}
+
+type AdsQoraChannel = {
+  id?: number;
+  canonical?: string;
+  link?: string;
+};
+
+type AdsQoraAddResponse = {
+  ok?: boolean;
+  created?: boolean;
+  message?: string;
+  exists?: boolean;
+  error?: string;
+  channel?: AdsQoraChannel;
+};
+
+function BlacklistAddPanel({ token }: { token: string | null }) {
+  const [link, setLink] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ severity: 'success' | 'info' | 'error'; text: string } | null>(null);
+
+  const addChannel = async () => {
+    const value = link.trim();
+    if (!value) {
+      setResult({ severity: 'error', text: "Kanal linkini kiriting" });
+      return;
+    }
+    setBusy(true);
+    setResult(null);
+    try {
+      const data = await apiFetch<AdsQoraAddResponse>('/adsqora/channels', token, {
+        method: 'POST',
+        body: JSON.stringify({ link: value })
+      });
+      const canonical = data.channel?.canonical ? ` (@${data.channel.canonical})` : '';
+      if (data.created) {
+        setResult({ severity: 'success', text: `Kanal qora bazaga qo'shildi${canonical}` });
+        setLink('');
+      } else {
+        setResult({ severity: 'info', text: `Kanal allaqachon bazada mavjud${canonical}` });
+      }
+    } catch (err) {
+      setResult({
+        severity: 'error',
+        text: err instanceof Error ? err.message : "Kanal qo'shishda xato"
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const checkChannel = async () => {
+    const value = link.trim();
+    if (!value) {
+      setResult({ severity: 'error', text: "Kanal linkini kiriting" });
+      return;
+    }
+    setBusy(true);
+    setResult(null);
+    try {
+      const data = await apiFetch<AdsQoraAddResponse>(
+        `/adsqora/channels/check?link=${encodeURIComponent(value)}`,
+        token
+      );
+      setResult(
+        data.exists
+          ? { severity: 'info', text: 'Kanal bazada BOR' }
+          : { severity: 'success', text: "Kanal bazada yo'q — qo'shish mumkin" }
+      );
+    } catch (err) {
+      setResult({
+        severity: 'error',
+        text: err instanceof Error ? err.message : 'Tekshirishda xato'
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Stack spacing={2} sx={{ maxWidth: 640 }}>
+      <Box>
+        <Typography variant="h6" sx={{ mb: 0.5 }}>
+          Qora kanal qo'shish
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          Kanal markaziy qora bazaga (adsqora) qo'shiladi. Link formati erkin:
+          https://t.me/kanal, t.me/kanal, @kanal yoki oddiy kanal nomi. Takror
+          qo'shish xato emas — tizim o'zi takrorlanmasligini ta'minlaydi.
+        </Typography>
+      </Box>
+      <TextField
+        label="Kanal linki"
+        placeholder="@kanal_nomi yoki https://t.me/kanal_nomi"
+        value={link}
+        onChange={(event) => setLink(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !busy) {
+            event.preventDefault();
+            void addChannel();
+          }
+        }}
+        fullWidth
+        disabled={busy}
+      />
+      <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
+        <Button
+          variant="contained"
+          onClick={() => void addChannel()}
+          disabled={busy}
+          startIcon={busy ? <CircularProgress size={16} color="inherit" /> : undefined}
+        >
+          Qo'shish
+        </Button>
+        <Button variant="outlined" onClick={() => void checkChannel()} disabled={busy}>
+          Tekshirish
+        </Button>
+      </Stack>
+      {result && (
+        <Alert severity={result.severity} onClose={() => setResult(null)}>
+          {result.text}
+        </Alert>
+      )}
+    </Stack>
   );
 }
 

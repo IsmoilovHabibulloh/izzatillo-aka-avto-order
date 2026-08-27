@@ -1,3 +1,4 @@
+mod adsqora;
 mod api;
 mod models;
 mod scanner;
@@ -5,6 +6,7 @@ mod smmmain;
 mod store;
 mod telegram;
 
+use crate::adsqora::AdsQoraService;
 use crate::api::{AppState, RuntimeInfo};
 use crate::models::DEFAULT_SMMMAIN_SERVICE_ID;
 use crate::smmmain::SmmMainService;
@@ -34,6 +36,9 @@ async fn main() -> Result<()> {
         env::var("TELEGRAM_SESSION_PATH").unwrap_or_else(|_| "data/userbot.session".to_string());
     let static_dir = env::var("STATIC_DIR").unwrap_or_else(|_| "frontend/dist".to_string());
     let smmmain_api_key = env::var("SMMMAIN_API_KEY").unwrap_or_default();
+    let adsqora_api_key = env::var("ADSQORA_API_KEY").unwrap_or_default();
+    let adsqora_api_url = env::var("ADSQORA_API_URL")
+        .unwrap_or_else(|_| "https://adsqora.vipads.uz/api".to_string());
     let smmmain_api_url =
         env::var("SMMMAIN_API_URL").unwrap_or_else(|_| "https://smmmain.com/api/v2".to_string());
 
@@ -45,6 +50,7 @@ async fn main() -> Result<()> {
         store,
         telegram: Arc::new(TelegramService::new(session_path)),
         smmmain: Arc::new(SmmMainService::new(smmmain_api_key, smmmain_api_url, DEFAULT_SMMMAIN_SERVICE_ID)),
+        adsqora: Arc::new(AdsQoraService::new(adsqora_api_key, adsqora_api_url)),
         sessions: Arc::new(RwLock::new(HashMap::new())),
         runtime: Arc::new(RwLock::new(RuntimeInfo::default())),
         rr: Arc::new(AtomicUsize::new(0)),

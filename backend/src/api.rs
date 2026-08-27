@@ -8,7 +8,7 @@ use crate::scanner;
 use crate::smmmain::SmmMainService;
 use crate::store::Store;
 use crate::telegram::TelegramService;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -26,6 +26,7 @@ pub struct AppState {
     pub store: Arc<Store>,
     pub telegram: Arc<TelegramService>,
     pub smmmain: Arc<SmmMainService>,
+    pub adsqora: Arc<crate::adsqora::AdsQoraService>,
     pub sessions: Arc<RwLock<HashMap<String, String>>>,
     pub runtime: Arc<RwLock<RuntimeInfo>>,
     /// Akkauntlar bo'yicha round-robin hisoblagich.
@@ -124,6 +125,8 @@ pub fn router(state: AppState) -> Router {
         .route("/results", get(get_results).delete(clear_results))
         .route("/logs", get(get_logs).delete(clear_logs))
         .route("/smmmain/balance", get(smmmain_balance))
+        .route("/adsqora/channels", post(adsqora_add_channel))
+        .route("/adsqora/channels/check", get(adsqora_check_channel))
         .route("/status", get(status))
         .route("/scan/run", post(run_scan))
         .route("/telegram/credentials", post(telegram_credentials))
@@ -211,6 +214,58 @@ async fn account_statuses(state: &AppState, accounts: &[TelegramAccount]) -> Vec
         });
     }
     out
+}
+
+#[derive(serde::Deserialize)]
+struct AdsQoraAddRequest {
+    link: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AdsQoraCheckQuery {
+    link: String,
+}
+
+/// adsqora javobini (status + JSON) frontendga o'zgarishsiz uzatamiz.
+fn adsqora_response(outcome: crate::adsqora::AdsQoraOutcome) -> Response {
+    let status = StatusCode::from_u16(outcome.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    (status, Json(outcome.body)).into_response()
+}
+
+async fn adsqora_add_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AdsQoraAddRequest>,
+) -> Result<Response, ApiError> {
+    require_auth(&headers, &state).await?;
+    let link = payload.link.trim();
+    if link.is_empty() {
+        return Err(ApiError::bad_request("Kanal linki bo'sh"));
+    }
+    let outcome = state
+        .adsqora
+        .add_channel(link)
+        .await
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    Ok(adsqora_response(outcome))
+}
+
+async fn adsqora_check_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AdsQoraCheckQuery>,
+) -> Result<Response, ApiError> {
+    require_auth(&headers, &state).await?;
+    let link = query.link.trim();
+    if link.is_empty() {
+        return Err(ApiError::bad_request("Kanal linki bo'sh"));
+    }
+    let outcome = state
+        .adsqora
+        .check_channel(link)
+        .await
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    Ok(adsqora_response(outcome))
 }
 
 async fn smmmain_balance(
