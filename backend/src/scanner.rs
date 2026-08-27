@@ -266,6 +266,25 @@ async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
     let action_logs = process_scan_actions(state, &settings, &collected, &added_items).await;
     scan_logs.extend(action_logs);
 
+    // 24 soatlik statistika: har topilmaning har bir mos kalit so'ziga bittadan event.
+    let appearances: Vec<(String, String, Option<String>)> = collected
+        .iter()
+        .flat_map(|ad| {
+            let channel = ad.channel.clone();
+            let title = ad.channel_title.clone();
+            ad.matched_keywords
+                .iter()
+                .map(move |kw| (kw.clone(), channel.clone(), title.clone()))
+        })
+        .collect();
+    if let Err(err) = state.store.record_appearances(&appearances, now).await {
+        scan_logs.push(PanelLog::new(
+            "error",
+            "Statistikani yozishda xato",
+            err.to_string(),
+        ));
+    }
+
     if let Err(err) = state.store.mark_keywords_checked(&keywords, now).await {
         scan_logs.push(PanelLog::new(
             "error",

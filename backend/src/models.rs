@@ -138,6 +138,9 @@ pub struct PersistedState {
     pub orders: HashMap<String, OrderRecord>,
     #[serde(default)]
     pub accounts: Vec<TelegramAccount>,
+    /// 24 soatlik statistika: kalit_so'z -> kanal -> soatlik bucketlar.
+    #[serde(default)]
+    pub stats: HashMap<String, HashMap<String, ChannelBuckets>>,
 }
 
 impl Default for PersistedState {
@@ -150,6 +153,7 @@ impl Default for PersistedState {
             logs: Vec::new(),
             orders: HashMap::new(),
             accounts: Vec::new(),
+            stats: HashMap::new(),
         }
     }
 }
@@ -250,6 +254,34 @@ pub struct RuntimeStatus {
     pub total_logs: usize,
 }
 
+/// Bitta kanal uchun soatlik uchrashuv bucketlari (24 soatlik sirg'aluvchi oyna).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChannelBuckets {
+    #[serde(default)]
+    pub title: Option<String>,
+    /// absolyut_soat (unix_ts / 3600) -> shu soatdagi uchrashuvlar soni
+    #[serde(default)]
+    pub hourly: HashMap<i64, u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ChannelSegment {
+    pub channel: String,
+    pub title: Option<String>,
+    pub whitelisted: bool,
+    pub count: u64,
+    pub percent: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct KeywordStat {
+    pub keyword: String,
+    pub total: u64,
+    pub whitelist_percent: f64,
+    pub order_percent: f64,
+    pub segments: Vec<ChannelSegment>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct SmmBalance {
     pub configured: bool,
@@ -297,6 +329,7 @@ pub struct DashboardResponse {
     pub results: Vec<AdResult>,
     pub logs: Vec<PanelLog>,
     pub accounts: Vec<AccountStatus>,
+    pub stats_24h: Vec<KeywordStat>,
 }
 
 #[derive(Clone, Debug, Serialize)]
