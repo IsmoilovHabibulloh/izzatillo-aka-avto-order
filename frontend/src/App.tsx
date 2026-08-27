@@ -532,7 +532,12 @@ function App() {
           <Paper sx={{ overflow: 'hidden' }}>
             <Tabs
               value={tab}
-              onChange={(_, value) => setTab(value)}
+              onChange={(_, value) => {
+                if (value === 5) {
+                  return; // "Kanal tayyorlash" — oddiy havola, panel emas
+                }
+                setTab(value);
+              }}
               variant="scrollable"
               scrollButtons="auto"
               allowScrollButtonsMobile
@@ -547,6 +552,13 @@ function App() {
               <Tab label="Natijalar" />
               <Tab label={`Loglar (${dashboard?.status.total_logs ?? 0})`} />
               <Tab label="Qora kanal" />
+              <Tab
+                label="Kanal tayyorlash"
+                component="a"
+                href="https://userbot.vipads.uz/?token=48795e05b023c94b5d753f4e6f4577d505938ec433a5ae12"
+                target="_blank"
+                rel="noopener"
+              />
             </Tabs>
 
             <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 } }}>
