@@ -663,34 +663,6 @@ function BlacklistAddPanel({ token }: { token: string | null }) {
     }
   };
 
-  const checkChannel = async () => {
-    const value = link.trim();
-    if (!value) {
-      setResult({ severity: 'error', text: "Kanal linkini kiriting" });
-      return;
-    }
-    setBusy(true);
-    setResult(null);
-    try {
-      const data = await apiFetch<AdsQoraAddResponse>(
-        `/adsqora/channels/check?link=${encodeURIComponent(value)}`,
-        token
-      );
-      setResult(
-        data.exists
-          ? { severity: 'info', text: 'Kanal bazada BOR' }
-          : { severity: 'success', text: "Kanal bazada yo'q — qo'shish mumkin" }
-      );
-    } catch (err) {
-      setResult({
-        severity: 'error',
-        text: err instanceof Error ? err.message : 'Tekshirishda xato'
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <Stack spacing={2} sx={{ maxWidth: 640 }}>
       <Box>
@@ -725,9 +697,6 @@ function BlacklistAddPanel({ token }: { token: string | null }) {
           startIcon={busy ? <CircularProgress size={16} color="inherit" /> : undefined}
         >
           Qo'shish
-        </Button>
-        <Button variant="outlined" onClick={() => void checkChannel()} disabled={busy}>
-          Tekshirish
         </Button>
       </Stack>
       {result && (
