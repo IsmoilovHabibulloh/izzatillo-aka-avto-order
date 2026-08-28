@@ -463,7 +463,7 @@ function App() {
               VIP Ads
             </Typography>
             <Typography variant="caption" sx={{ opacity: 0.8 }} noWrap>
-              izzatillo-aka.vipads.uz
+              avto-order.vipads.uz
             </Typography>
           </Box>
           <Tooltip title="Yangilash">

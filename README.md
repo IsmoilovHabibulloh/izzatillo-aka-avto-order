@@ -42,7 +42,7 @@ http://127.0.0.1:8080
 ```bash
 HOST=0.0.0.0
 PORT=8080
-PUBLIC_DOMAIN=izzatillo-aka.vipads.uz
+PUBLIC_DOMAIN=avto-order.vipads.uz
 ADMIN_USERNAME=Izzatillo
 ADMIN_PASSWORD=Izzatilloaka
 STATE_PATH=data/state.json
@@ -89,7 +89,7 @@ WantedBy=multi-user.target
 
 ```nginx
 server {
-    server_name izzatillo-aka.vipads.uz;
+    server_name avto-order.vipads.uz;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -104,7 +104,7 @@ server {
 SSL uchun odatda:
 
 ```bash
-certbot --nginx -d izzatillo-aka.vipads.uz
+certbot --nginx -d avto-order.vipads.uz
 ```
 
 ## Admin panel oqimi
