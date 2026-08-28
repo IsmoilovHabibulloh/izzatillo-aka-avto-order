@@ -22,17 +22,26 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 #[derive(Clone)]
-pub struct AppState {
+pub struct TenantState {
+    /// Tenant nomi (env/konfiguratsiya kaliti, masalan "izzatillo").
+    pub name: String,
     pub store: Arc<Store>,
     pub telegram: Arc<TelegramService>,
     pub smmmain: Arc<SmmMainService>,
     pub adsqora: Arc<crate::adsqora::AdsQoraService>,
-    pub sessions: Arc<RwLock<HashMap<String, String>>>,
     pub runtime: Arc<RwLock<RuntimeInfo>>,
     /// Akkauntlar bo'yicha round-robin hisoblagich.
     pub rr: Arc<AtomicUsize>,
     pub admin_username: String,
     pub admin_password: String,
+}
+
+/// Router holati: bir nechta tenant (har biri o'z login/parol, state va servislari
+/// bilan) + umumiy sessiya jadvali (token -> tenant indeksi).
+#[derive(Clone)]
+pub struct AppState {
+    pub tenants: Vec<TenantState>,
+    pub sessions: Arc<RwLock<HashMap<String, usize>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -43,7 +52,7 @@ pub struct RuntimeInfo {
     pub last_error: Option<String>,
 }
 
-impl AppState {
+impl TenantState {
     pub async fn status(&self) -> RuntimeStatus {
         let runtime = self.runtime.read().await.clone();
         let snapshot = self.store.snapshot().await;
@@ -142,13 +151,12 @@ async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
-    if payload.username == state.admin_username && payload.password == state.admin_password {
+    let matched = state.tenants.iter().position(|tenant| {
+        payload.username == tenant.admin_username && payload.password == tenant.admin_password
+    });
+    if let Some(idx) = matched {
         let token = Uuid::new_v4().to_string();
-        state
-            .sessions
-            .write()
-            .await
-            .insert(token.clone(), payload.username);
+        state.sessions.write().await.insert(token.clone(), idx);
         Ok(Json(LoginResponse { token }))
     } else {
         Err(ApiError::unauthorized())
@@ -169,15 +177,17 @@ async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<MeResponse>, ApiError> {
-    let username = require_auth(&headers, &state).await?;
-    Ok(Json(MeResponse { username }))
+    let state = require_auth(&headers, &state).await?;
+    Ok(Json(MeResponse {
+        username: state.admin_username.clone(),
+    }))
 }
 
 async fn dashboard(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<DashboardResponse>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     let snapshot = state.store.snapshot().await;
     let accounts = account_statuses(&state, &snapshot.accounts).await;
     let stats_24h = state
@@ -196,7 +206,7 @@ async fn dashboard(
     }))
 }
 
-async fn account_statuses(state: &AppState, accounts: &[TelegramAccount]) -> Vec<AccountStatus> {
+async fn account_statuses(state: &TenantState, accounts: &[TelegramAccount]) -> Vec<AccountStatus> {
     let now = Utc::now();
     let mut out = Vec::with_capacity(accounts.len());
     for account in accounts {
@@ -237,7 +247,7 @@ async fn adsqora_add_channel(
     headers: HeaderMap,
     Json(payload): Json<AdsQoraAddRequest>,
 ) -> Result<Response, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     let link = payload.link.trim();
     if link.is_empty() {
         return Err(ApiError::bad_request("Kanal linki bo'sh"));
@@ -255,7 +265,7 @@ async fn adsqora_check_channel(
     headers: HeaderMap,
     Query(query): Query<AdsQoraCheckQuery>,
 ) -> Result<Response, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     let link = query.link.trim();
     if link.is_empty() {
         return Err(ApiError::bad_request("Kanal linki bo'sh"));
@@ -272,7 +282,7 @@ async fn smmmain_balance(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SmmBalance>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     Ok(Json(public_smm_balance(&state).await))
 }
 
@@ -280,7 +290,7 @@ async fn get_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Settings>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     Ok(Json(state.store.settings().await))
 }
 
@@ -289,7 +299,7 @@ async fn update_settings(
     headers: HeaderMap,
     Json(settings): Json<Settings>,
 ) -> Result<Json<Settings>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     let previous = state.store.settings().await;
     let clean = state.store.update_settings(settings).await?;
 
@@ -325,7 +335,7 @@ async fn get_results(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::models::AdResult>>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     Ok(Json(state.store.snapshot().await.results))
 }
 
@@ -333,7 +343,7 @@ async fn clear_results(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SimpleMessage>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     state.store.clear_results().await?;
     Ok(Json(SimpleMessage::new("Natijalar tozalandi")))
 }
@@ -342,7 +352,7 @@ async fn get_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<PanelLog>>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     Ok(Json(state.store.snapshot().await.logs))
 }
 
@@ -350,7 +360,7 @@ async fn clear_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SimpleMessage>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     state.store.clear_logs().await?;
     Ok(Json(SimpleMessage::new("Loglar tozalandi")))
 }
@@ -359,7 +369,7 @@ async fn status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<RuntimeStatus>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     Ok(Json(state.status().await))
 }
 
@@ -367,7 +377,7 @@ async fn run_scan(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<crate::models::ScanResponse>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     Ok(Json(scanner::scan_once(state).await?))
 }
 
@@ -376,7 +386,7 @@ async fn telegram_credentials(
     headers: HeaderMap,
     Json(payload): Json<CredentialsRequest>,
 ) -> Result<Json<SimpleMessage>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     if payload.api_id <= 0 || payload.api_hash.trim().is_empty() {
         return Err(ApiError::bad_request("API ID va API hash kerak"));
     }
@@ -391,7 +401,7 @@ async fn telegram_accounts(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AccountStatus>>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     let accounts = state.store.accounts().await;
     Ok(Json(account_statuses(&state, &accounts).await))
 }
@@ -400,7 +410,7 @@ async fn telegram_qr_start(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<QrStartResponse>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     let settings = state.store.telegram_settings().await;
     let api_id = settings
         .api_id
@@ -428,7 +438,7 @@ async fn telegram_qr_poll(
     headers: HeaderMap,
     Json(payload): Json<AccountIdRequest>,
 ) -> Result<Json<QrPollResponse>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     let outcome = state.telegram.poll_qr(&payload.account_id).await?;
     Ok(Json(qr_response(&state, &payload.account_id, outcome).await?))
 }
@@ -438,7 +448,7 @@ async fn telegram_qr_password(
     headers: HeaderMap,
     Json(payload): Json<QrPasswordRequest>,
 ) -> Result<Json<QrPollResponse>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     if payload.password.trim().is_empty() {
         return Err(ApiError::bad_request("2FA parol kerak"));
     }
@@ -454,7 +464,7 @@ async fn telegram_account_remove(
     headers: HeaderMap,
     Json(payload): Json<AccountIdRequest>,
 ) -> Result<Json<SimpleMessage>, ApiError> {
-    require_auth(&headers, &state).await?;
+    let state = require_auth(&headers, &state).await?;
     state.telegram.remove_account_session(&payload.account_id).await?;
     state.store.remove_account(&payload.account_id).await?;
     Ok(Json(SimpleMessage::new("Akkaunt o'chirildi")))
@@ -462,7 +472,7 @@ async fn telegram_account_remove(
 
 /// QR natijasini javobga aylantiradi; ulanganda akkauntni saqlaydi.
 async fn qr_response(
-    state: &AppState,
+    state: &TenantState,
     account_id: &str,
     outcome: QrOutcome,
 ) -> Result<QrPollResponse, ApiError> {
@@ -525,14 +535,18 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(|value| value.to_string())
 }
 
-async fn require_auth(headers: &HeaderMap, state: &AppState) -> Result<String, ApiError> {
+async fn require_auth(headers: &HeaderMap, state: &AppState) -> Result<TenantState, ApiError> {
     let token = bearer_token(headers).ok_or_else(ApiError::unauthorized)?;
 
-    state
+    let idx = *state
         .sessions
         .read()
         .await
         .get(&token)
+        .ok_or_else(ApiError::unauthorized)?;
+    state
+        .tenants
+        .get(idx)
         .cloned()
         .ok_or_else(ApiError::unauthorized)
 }
@@ -544,7 +558,7 @@ fn public_telegram_settings(mut settings: TelegramSettings) -> TelegramSettings 
     settings
 }
 
-async fn public_smm_balance(state: &AppState) -> SmmBalance {
+async fn public_smm_balance(state: &TenantState) -> SmmBalance {
     let checked_at = Utc::now();
     if !state.smmmain.is_configured() {
         return SmmBalance {

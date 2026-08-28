@@ -1,4 +1,4 @@
-use crate::api::AppState;
+use crate::api::TenantState;
 use crate::models::{
     AdResult, DEFAULT_SMMMAIN_SERVICE_ID, KeywordRule, OrderRecord, PanelLog, ScanResponse, Settings,
 };
@@ -26,7 +26,7 @@ fn flood_wait_secs(err: &anyhow::Error) -> Option<i64> {
 /// shuncha daqiqa kutib turamiz; shu vaqtdan keyin baribir qayta yuborishga ruxsat.
 const ORDER_RECHECK_MINUTES: i64 = 10;
 
-pub async fn scanner_loop(state: AppState) {
+pub async fn scanner_loop(state: TenantState) {
     loop {
         let interval = state.store.settings().await.interval_seconds.max(2);
         {
@@ -56,15 +56,15 @@ pub async fn scanner_loop(state: AppState) {
     }
 }
 
-pub async fn scan_once(state: AppState) -> Result<ScanResponse> {
+pub async fn scan_once(state: TenantState) -> Result<ScanResponse> {
     scan_with_mode(state, true).await
 }
 
-async fn scan_due(state: AppState) -> Result<ScanResponse> {
+async fn scan_due(state: TenantState) -> Result<ScanResponse> {
     scan_with_mode(state, false).await
 }
 
-async fn scan_with_mode(state: AppState, force: bool) -> Result<ScanResponse> {
+async fn scan_with_mode(state: TenantState, force: bool) -> Result<ScanResponse> {
     {
         let mut runtime = state.runtime.write().await;
         if runtime.scanning {
@@ -102,7 +102,7 @@ async fn scan_with_mode(state: AppState, force: bool) -> Result<ScanResponse> {
     }
 }
 
-async fn scan_inner(state: &AppState, force: bool) -> Result<ScanResponse> {
+async fn scan_inner(state: &TenantState, force: bool) -> Result<ScanResponse> {
     let settings = state.store.settings().await;
     let telegram_settings = state.store.telegram_settings().await;
 
@@ -325,7 +325,7 @@ enum OrderDecision {
 }
 
 async fn process_scan_actions(
-    state: &AppState,
+    state: &TenantState,
     settings: &Settings,
     collected: &[AdResult],
     added: &[AdResult],
@@ -518,7 +518,7 @@ async fn process_scan_actions(
 ///        - aks holda → o'tkazib yuboriladi.
 ///    - holatni aniqlab bo'lmasa → faqat 10 daqiqa o'tgach qayta yuboriladi (ikki marta pul ketmasligi uchun).
 async fn decide_order(
-    state: &AppState,
+    state: &TenantState,
     record: &Option<OrderRecord>,
     now: DateTime<Utc>,
 ) -> OrderDecision {
