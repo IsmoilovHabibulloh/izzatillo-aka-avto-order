@@ -330,6 +330,7 @@ pub struct DashboardResponse {
     pub logs: Vec<PanelLog>,
     pub accounts: Vec<AccountStatus>,
     pub stats_24h: Vec<KeywordStat>,
+    pub userbot_url: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

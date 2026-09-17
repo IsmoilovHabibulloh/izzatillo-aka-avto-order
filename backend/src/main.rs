@@ -143,6 +143,7 @@ async fn build_tenant(name: &str, prefix: Option<&str>) -> Result<TenantState> {
         "ADSQORA_API_URL",
         "https://adsqora.vipads.uz/api",
     );
+    let userbot_url = tenant_only("USERBOT_URL", "");
     let admin_username = tenant_only("USERNAME", name);
     let admin_password = tenant_only("PASSWORD", "");
     let (admin_username, admin_password) = if prefix.is_none() {
@@ -172,6 +173,7 @@ async fn build_tenant(name: &str, prefix: Option<&str>) -> Result<TenantState> {
         rr: Arc::new(AtomicUsize::new(0)),
         admin_username,
         admin_password,
+        userbot_url,
     })
 }
 

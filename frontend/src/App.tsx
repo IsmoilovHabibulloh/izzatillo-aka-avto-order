@@ -552,13 +552,15 @@ function App() {
               <Tab label="Natijalar" />
               <Tab label={`Loglar (${dashboard?.status.total_logs ?? 0})`} />
               <Tab label="Qora kanal" />
-              <Tab
-                label="Kanal tayyorlash"
-                component="a"
-                href="https://userbot.vipads.uz/?token=48795e05b023c94b5d753f4e6f4577d505938ec433a5ae12"
-                target="_blank"
-                rel="noopener"
-              />
+              {dashboard?.userbot_url ? (
+                <Tab
+                  label="Kanal tayyorlash"
+                  component="a"
+                  href={dashboard.userbot_url}
+                  target="_blank"
+                  rel="noopener"
+                />
+              ) : null}
             </Tabs>
 
             <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 } }}>

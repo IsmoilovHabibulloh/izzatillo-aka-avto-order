@@ -34,6 +34,8 @@ pub struct TenantState {
     pub rr: Arc<AtomicUsize>,
     pub admin_username: String,
     pub admin_password: String,
+    /// "Kanal tayyorlash" tabi ochadigan havola (har tenantda o'ziniki).
+    pub userbot_url: String,
 }
 
 /// Router holati: bir nechta tenant (har biri o'z login/parol, state va servislari
@@ -203,6 +205,7 @@ async fn dashboard(
         logs: snapshot.logs,
         accounts,
         stats_24h,
+        userbot_url: state.userbot_url.clone(),
     }))
 }
 

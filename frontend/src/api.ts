@@ -116,6 +116,7 @@ export type Dashboard = {
   logs: PanelLog[];
   accounts: AccountStatus[];
   stats_24h: KeywordStat[];
+  userbot_url: string;
 };
 
 export type LoginResponse = {
