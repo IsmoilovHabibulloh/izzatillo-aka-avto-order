@@ -896,7 +896,13 @@ function KeywordDonut({ stat }: { stat: KeywordStat }) {
             <Typography sx={{ fontWeight: 800, fontSize: '0.95rem', lineHeight: 1 }} className="text-clamp">
               {stat.keyword}
             </Typography>
-            <Typography variant="caption" color="text.secondary">
+            <Typography
+              variant="caption"
+              sx={{ fontWeight: 800, color: 'success.main', lineHeight: 1.4 }}
+            >
+              🟢 {stat.whitelist_percent.toFixed(0)}%
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.3 }}>
               {stat.total} ta
             </Typography>
           </Box>
