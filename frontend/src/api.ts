@@ -166,11 +166,18 @@ export async function apiFetch<T>(
     headers.set('Content-Type', 'application/json');
   }
 
+  // 30s timeout: backend javob bermay qolsa so'rov abadiy osilib qolmasin —
+  // UI xatoni ko'rsatadi va autosave himoyasi ishlashda davom etadi.
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 30_000);
+
   let response: Response;
   try {
-    response = await fetch(`/api${path}`, { ...init, headers });
+    response = await fetch(`/api${path}`, { ...init, headers, signal: controller.signal });
   } catch {
-    throw new ApiError("Serverga ulanib bo'lmadi", 0);
+    throw new ApiError("Serverga ulanib bo'lmadi yoki javob kutish vaqti tugadi", 0);
+  } finally {
+    window.clearTimeout(timer);
   }
 
   const raw = await response.text();

@@ -132,6 +132,8 @@ function App() {
       if (!dirtyRef.current) {
         setSettings(normalizeSettings(data.settings));
       }
+      // Sozlamalar serverdan muvaffaqiyatli yuklandi — endi saqlashga ruxsat.
+      initializedRef.current = true;
       setError(null);
     } catch (err) {
       if (!handleAuthError(err)) {
@@ -208,6 +210,14 @@ function App() {
   // ketmaydi; muvaffaqiyatda tozalanadi.
   const commitSettings = useCallback(
     async (next: Settings, successMessage?: string) => {
+      // HIMOYA: server sozlamalari hali bir marta ham yuklanmagan bo'lsa,
+      // saqlamaymiz. Aks holda backend javob bermay qolganda bo'sh (default)
+      // sozlamalar serverga yozilib, keylar va ro'yxatlar o'chib ketadi —
+      // 2026-09-21 dagi hodisa aynan shu edi.
+      if (!initializedRef.current) {
+        setError("Sozlamalar hali serverdan yuklanmadi — saqlash bloklandi. Sahifani yangilang.");
+        return;
+      }
       setError(null);
       setSaving(true);
       dirtyRef.current = true;

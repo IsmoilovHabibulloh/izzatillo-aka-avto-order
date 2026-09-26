@@ -33,7 +33,13 @@ impl SmmMainService {
             api_key,
             api_url,
             service_id,
-            http: Client::new(),
+            // reqwest default'da umumiy timeout yo'q — javob kelmasa skaner
+            // abadiy kutib qolmasligi uchun aniq chegara qo'yamiz.
+            http: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
         }
     }
 

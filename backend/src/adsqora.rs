@@ -22,7 +22,13 @@ impl AdsQoraService {
         Self {
             api_key,
             api_url,
-            http: Client::new(),
+            // reqwest default'da umumiy timeout yo'q — javob kelmasa handler
+            // abadiy kutib qolmasligi uchun aniq chegara qo'yamiz.
+            http: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
         }
     }
 

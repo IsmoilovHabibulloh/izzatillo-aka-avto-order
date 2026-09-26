@@ -11,8 +11,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio::time::{Duration as TokioDuration, timeout};
 
 use crate::models::AdResult;
+
+/// Telegram tarmoq chaqiruvlari uchun timeoutlar. Grammers `invoke` o'zi
+/// timeout qo'ymaydi: o'lik (half-open) ulanishda chaqiruv abadiy osiladi.
+/// Ilgari `is_authorized` shunday osilib, `clients` mutex'ini qulflab, butun
+/// servisni (status, akkauntlar, skaner) muzlatib qo'ygan. Endi har bir
+/// chaqiruv chegaralangan; oshsa klient o'lik hisoblanib keshdan chiqariladi
+/// va keyingi urinishda sessiyadan qayta ulanadi.
+const AUTH_CHECK_TIMEOUT: TokioDuration = TokioDuration::from_secs(10);
+const CONNECT_TIMEOUT: TokioDuration = TokioDuration::from_secs(20);
+const QUERY_TIMEOUT: TokioDuration = TokioDuration::from_secs(30);
 
 /// Bir nechta Telegram akkauntini (userbot) boshqaradigan xizmat.
 /// Har akkaunt o'z sessiya faylida: `<session_dir>/userbot-<id>.session`.
@@ -68,21 +79,41 @@ impl TelegramService {
         self.session_dir.join(format!("userbot-{account_id}.session"))
     }
 
+    /// Keshdagi klientni olib tashlaydi va runner taskini to'xtatadi.
+    async fn drop_client(&self, account_id: &str) {
+        if let Some(old) = self.clients.lock().await.remove(account_id) {
+            old.runner.abort();
+        }
+    }
+
     /// Akkaunt uchun ulangan (avtorizatsiyalangan) klientni qaytaradi. Kesh bo'lsa
     /// undan, bo'lmasa sessiyadan ulanadi.
+    ///
+    /// MUHIM: `clients` qulfi hech qachon tarmoq chaqiruvi ustida ushlab
+    /// turilmaydi — klient klonlanadi, qulf bo'shatiladi, keyin timeout bilan
+    /// tekshiriladi. Aks holda bitta o'lik ulanish butun servisni muzlatadi.
     pub async fn ensure_account_client(&self, account_id: &str, api_id: i32) -> Result<Client> {
-        {
+        let cached = {
             let clients = self.clients.lock().await;
-            if let Some(active) = clients.get(account_id) {
-                if active.client.is_authorized().await.unwrap_or(false) {
-                    return Ok(active.client.clone());
-                }
+            clients.get(account_id).map(|active| active.client.clone())
+        };
+        if let Some(client) = cached {
+            match timeout(AUTH_CHECK_TIMEOUT, client.is_authorized()).await {
+                Ok(Ok(true)) => return Ok(client),
+                // Timeout yoki xato — klient o'lik, keshdan chiqarib qayta ulanamiz.
+                _ => self.drop_client(account_id).await,
             }
         }
 
         let path = self.account_session_path(account_id);
-        let (client, _handle, _session, runner) = self.connect(api_id, &path).await?;
-        if !client.is_authorized().await.unwrap_or(false) {
+        let (client, _handle, _session, runner) = timeout(CONNECT_TIMEOUT, self.connect(api_id, &path))
+            .await
+            .map_err(|_| anyhow!("Ulanish vaqtida timeout: {account_id}"))??;
+        let authorized = matches!(
+            timeout(AUTH_CHECK_TIMEOUT, client.is_authorized()).await,
+            Ok(Ok(true))
+        );
+        if !authorized {
             runner.abort();
             bail!("Akkaunt ulanmagan (qayta QR kerak): {account_id}");
         }
@@ -101,12 +132,22 @@ impl TelegramService {
     }
 
     /// Akkaunt keshda ulangan-ulanmaganini tekshiradi (tarmoqqa yangi ulanmaydi).
+    /// Qulf tarmoq chaqiruvidan oldin bo'shatiladi; timeout'da klient o'lik deb
+    /// topilib keshdan chiqariladi (keyingi scan qayta ulaydi).
     pub async fn is_account_connected(&self, account_id: &str) -> bool {
-        let clients = self.clients.lock().await;
-        if let Some(active) = clients.get(account_id) {
-            active.client.is_authorized().await.unwrap_or(false)
-        } else {
-            false
+        let client = {
+            let clients = self.clients.lock().await;
+            clients.get(account_id).map(|active| active.client.clone())
+        };
+        let Some(client) = client else {
+            return false;
+        };
+        match timeout(AUTH_CHECK_TIMEOUT, client.is_authorized()).await {
+            Ok(Ok(value)) => value,
+            _ => {
+                self.drop_client(account_id).await;
+                false
+            }
         }
     }
 
@@ -118,15 +159,26 @@ impl TelegramService {
         api_hash: &str,
     ) -> Result<(String, DateTime<Utc>)> {
         let path = self.account_session_path(account_id);
-        let (client, handle, session, runner) = self.connect(api_id, &path).await?;
+        let (client, handle, session, runner) = timeout(CONNECT_TIMEOUT, self.connect(api_id, &path))
+            .await
+            .map_err(|_| anyhow!("Ulanish vaqtida timeout: {account_id}"))??;
 
-        let exported = client
-            .invoke(&tl::functions::auth::ExportLoginToken {
+        let exported = match timeout(
+            QUERY_TIMEOUT,
+            client.invoke(&tl::functions::auth::ExportLoginToken {
                 api_id,
                 api_hash: api_hash.to_string(),
                 except_ids: vec![],
-            })
-            .await;
+            }),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                runner.abort();
+                bail!("QR token olishda timeout");
+            }
+        };
 
         match exported {
             Ok(tl::enums::auth::LoginToken::Token(token)) => {
@@ -174,14 +226,22 @@ impl TelegramService {
             return Ok(QrOutcome::NeedPassword);
         }
 
-        let exported = pending
-            .client
-            .invoke(&tl::functions::auth::ExportLoginToken {
+        let exported = match timeout(
+            QUERY_TIMEOUT,
+            pending.client.invoke(&tl::functions::auth::ExportLoginToken {
                 api_id: pending.api_id,
                 api_hash: pending.api_hash.clone(),
                 except_ids: vec![],
-            })
-            .await;
+            }),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                pending.runner.abort();
+                bail!("QR holatini tekshirishda timeout");
+            }
+        };
 
         match exported {
             Ok(tl::enums::auth::LoginToken::Token(token)) => {
@@ -250,11 +310,13 @@ impl TelegramService {
             .remove(account_id)
             .ok_or_else(|| anyhow!("QR sessiya topilmadi, qaytadan boshlang"))?;
 
-        let password_info = pending
-            .client
-            .invoke(&tl::functions::account::GetPassword {})
-            .await
-            .map_err(|err| anyhow!(err).context("2FA parol ma'lumotini olib bo'lmadi"))?;
+        let password_info = timeout(
+            QUERY_TIMEOUT,
+            pending.client.invoke(&tl::functions::account::GetPassword {}),
+        )
+        .await
+        .map_err(|_| anyhow!("2FA parol ma'lumotini olishda timeout"))?
+        .map_err(|err| anyhow!(err).context("2FA parol ma'lumotini olib bo'lmadi"))?;
         let tl::enums::account::Password::Password(password_info) = password_info;
         let token = PasswordToken::new(password_info);
 
@@ -310,10 +372,9 @@ impl TelegramService {
         token: Vec<u8>,
     ) -> Result<tl::enums::auth::LoginToken> {
         let body = tl::functions::auth::ImportLoginToken { token }.to_bytes();
-        let resp = pending
-            .handle
-            .invoke_in_dc(dc_id, body)
+        let resp = timeout(QUERY_TIMEOUT, pending.handle.invoke_in_dc(dc_id, body))
             .await
+            .map_err(|_| anyhow!("importLoginToken (DC) timeout"))?
             .map_err(|err| anyhow!(err).context("importLoginToken (DC) xato"))?;
         let result = tl::enums::auth::LoginToken::from_bytes(&resp)
             .map_err(|err| anyhow!("importLoginToken javobini o'qib bo'lmadi: {err}"))?;
@@ -328,9 +389,9 @@ impl TelegramService {
 
     /// Pending QR klientni faol klientlar ro'yxatiga ko'chiradi va username'ni qaytaradi.
     async fn finalize(&self, account_id: &str, pending: PendingQr) -> Option<String> {
-        let username = match pending.client.get_me().await {
-            Ok(me) => me.username().map(|s| s.to_string()),
-            Err(_) => None,
+        let username = match timeout(QUERY_TIMEOUT, pending.client.get_me()).await {
+            Ok(Ok(me)) => me.username().map(|s| s.to_string()),
+            _ => None,
         };
         let mut clients = self.clients.lock().await;
         if let Some(old) = clients.insert(
@@ -370,12 +431,15 @@ impl TelegramService {
             return Ok(Vec::new());
         }
 
-        let response = client
-            .invoke(&tl::functions::contacts::GetSponsoredPeers {
+        let response = timeout(
+            QUERY_TIMEOUT,
+            client.invoke(&tl::functions::contacts::GetSponsoredPeers {
                 q: query_trimmed.to_string(),
-            })
-            .await
-            .with_context(|| format!("Telegram sponsored qidiruv xatosi: {query_trimmed}"))?;
+            }),
+        )
+        .await
+        .map_err(|_| anyhow!("Telegram sponsored qidiruvda timeout: {query_trimmed}"))?
+        .with_context(|| format!("Telegram sponsored qidiruv xatosi: {query_trimmed}"))?;
 
         let data = match response {
             tl::enums::contacts::SponsoredPeers::Peers(data) => data,
