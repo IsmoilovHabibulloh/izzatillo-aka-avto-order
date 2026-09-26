@@ -117,10 +117,105 @@ export type Dashboard = {
   accounts: AccountStatus[];
   stats_24h: KeywordStat[];
   userbot_url: string;
+  display_name: string;
+  maintenance: boolean;
 };
+
+export type Role = 'admin' | 'tenant';
 
 export type LoginResponse = {
   token: string;
+  role: Role;
+};
+
+export type MeResponse = {
+  role: Role;
+  username: string;
+  tenant_id?: string | null;
+  display_name?: string | null;
+  via_admin: boolean;
+  maintenance: boolean;
+  maintenance_message?: string | null;
+  maintenance_since?: string | null;
+};
+
+export type AdminTenant = {
+  id: string;
+  display_name: string;
+  username: string;
+  smm_api_key: string;
+  smm_api_url: string;
+  adsqora_api_key: string;
+  adsqora_api_url: string;
+  userbot_url: string;
+  telegram_api_id?: number | null;
+  telegram_api_hash?: string | null;
+  maintenance: boolean;
+  maintenance_message: string;
+  maintenance_since?: string | null;
+  state_path: string;
+  session_dir: string;
+  created_at: string;
+  updated_at: string;
+  scanner_enabled: boolean;
+  scanning: boolean;
+  last_run_at?: string | null;
+  last_error?: string | null;
+  keywords_total: number;
+  keywords_enabled: number;
+  accounts_total: number;
+  accounts_flooded: number;
+  results_total: number;
+  logs_total: number;
+  active_sessions: number;
+};
+
+export type AdminDefaults = {
+  smm_api_url: string;
+  adsqora_api_url: string;
+  telegram_api_configured: boolean;
+  maintenance_message: string;
+  data_dir: string;
+};
+
+export type AdminTenantsResponse = {
+  admin_username: string;
+  tenants: AdminTenant[];
+  defaults: AdminDefaults;
+};
+
+// Qo'shish/tahrirlash formasi (tahrirlashda bo'sh parol — o'zgarmaydi).
+export type TenantUpsert = {
+  id?: string;
+  display_name: string;
+  username: string;
+  password: string;
+  smm_api_key: string;
+  smm_api_url: string;
+  adsqora_api_key: string;
+  adsqora_api_url: string;
+  userbot_url: string;
+  telegram_api_id: string;
+  telegram_api_hash: string;
+  maintenance_message: string;
+};
+
+export type TenantCheckItem = {
+  ok: boolean;
+  message: string;
+};
+
+export type TenantCheckResponse = {
+  smm: TenantCheckItem;
+  adsqora: TenantCheckItem;
+  telegram: TenantCheckItem;
+};
+
+export type OpenPanelResponse = {
+  token: string;
+  tenant_id: string;
+  display_name: string;
+  maintenance: boolean;
 };
 
 export type QrStartResponse = {
@@ -146,11 +241,18 @@ export type ScanResponse = {
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  // Serverning mashina uchun kodi, masalan 'maintenance' (profilaktika).
+  code: string | null;
+  constructor(message: string, status: number, code: string | null = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
   }
+}
+
+export function isMaintenanceError(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.code === 'maintenance';
 }
 
 export async function apiFetch<T>(
@@ -192,11 +294,10 @@ export async function apiFetch<T>(
   }
 
   if (!response.ok) {
-    const message =
-      (data && typeof data === 'object' && 'error' in data
-        ? String((data as { error: unknown }).error)
-        : null) ?? `HTTP ${response.status}`;
-    throw new ApiError(message, response.status);
+    const body = data && typeof data === 'object' ? (data as { error?: unknown; code?: unknown }) : null;
+    const message = body && 'error' in body ? String(body.error) : `HTTP ${response.status}`;
+    const code = body && typeof body.code === 'string' ? body.code : null;
+    throw new ApiError(message, response.status, code);
   }
 
   return data as T;

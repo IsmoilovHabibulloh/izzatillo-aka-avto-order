@@ -6,13 +6,32 @@ Rust + Grammers asosidagi Telegram Ads tekshiruvchi userbot va bitta serverdan i
 
 - Rust `axum` backend.
 - React + MUI admin panel.
-- Admin login: `Izzatillo` / `Izzatilloaka`.
+- Bosh admin paneli: foydalanuvchilar, kalitlar/havolalar, profilaktika (pastda).
 - Telegram userbot ulash: API ID, API hash, telefon, kod, 2FA parol.
 - `contacts.getSponsoredPeers` orqali har bir key (kalit so'z) bo'yicha GLOBAL sponsored qidiruv.
 - `messages.viewSponsoredMessage`, `messages.clickSponsoredMessage`, `messages.reportSponsoredMessage` chaqirilmaydi.
 - Interval va keylar (kalit so'zlar) paneldan sozlanadi. Alohida "tekshiriladigan kanallar" ro'yxati yo'q — qidiruv global.
 - Default interval: 5 sekund.
 - Natijalar `data/state.json`da, Telegram session `data/userbot.session`da saqlanadi.
+
+## Admin panel va foydalanuvchilar
+
+- `SUPERADMIN_USERNAME` / `SUPERADMIN_PASSWORD` bilan kirilsa — admin panel ochiladi (oddiy login sahifasining o'zidan).
+- Foydalanuvchilar `data/tenants.json` da saqlanadi (parollar argon2 xesh, fayl `0600`). Admin paneldan qo'shiladi, tahrirlanadi, o'chiriladi — restart kerak emas.
+- Yangi foydalanuvchi qo'shilganda uning bazasi (`data/state-<id>.json`) va userbot sessiya papkasi (`data/<id>/`) darhol yaratiladi, skaneri ishga tushadi.
+- SMM/Adsqora URL va kalitlari, "Kanal tayyorlash" havolasi, Telegram API ID/hash — har foydalanuvchiga alohida, admin paneldan.
+- `tenants.json` yo'q bo'lsa, birinchi ishga tushishda eski `.env` (`TENANTS=...`, `TENANT_<NOMI>_*`) dan bir marta import qilinadi; keyin `.env` dagi `TENANT_*` o'qilmaydi.
+- O'chirilgan foydalanuvchining bazasi va shaxsiy sessiya papkasi `.deleted-<vaqt>` nomiga o'tkaziladi (butunlay o'chmaydi).
+
+### Profilaktika
+
+Admin istalgan foydalanuvchini (yoki tanlanganlarni) profilaktikaga o'tkazadi:
+
+- foydalanuvchiga faqat "Vaqtinchalik profilaktika" ekrani chiqadi, panelning hech bir oynasi ochilmaydi (API `423` + `code: "maintenance"` qaytaradi);
+- skaner va orderlar pauzada; yarim yo'ldagi scan to'xtaydi, keylar "tekshirildi" deb belgilanmaydi;
+- foydalanuvchi sozlamalari o'zgarmaydi — "Ishga qaytarish" bosilganda skaner qolgan joyidan davom etadi, ochiq panel o'zi qayta ochiladi;
+- holat `tenants.json` da saqlanadi, server restartidan keyin ham saqlanib qoladi;
+- admin "Panelni ochish" orqali profilaktikadagi foydalanuvchi panelini ko'ra oladi.
 
 ## Muhim izoh
 
@@ -43,8 +62,9 @@ http://127.0.0.1:8080
 HOST=0.0.0.0
 PORT=8080
 PUBLIC_DOMAIN=avto-order.vipads.uz
-ADMIN_USERNAME=Izzatillo
-ADMIN_PASSWORD=Izzatilloaka
+SUPERADMIN_USERNAME=admin
+SUPERADMIN_PASSWORD=...
+TENANTS_PATH=data/tenants.json
 STATE_PATH=data/state.json
 TELEGRAM_SESSION_PATH=data/userbot.session
 STATIC_DIR=frontend/dist
@@ -109,13 +129,11 @@ certbot --nginx -d avto-order.vipads.uz
 
 ## Admin panel oqimi
 
-1. `Izzatillo` / `Izzatilloaka` bilan kiring.
-2. `Userbot` tabida API ID, API hash va telefon kiriting.
-3. `Kod olish` bosing.
-4. Telegramdan kelgan kodni kiriting.
-5. Agar 2FA yoqilgan bo'lsa, 2FA parolni kiriting.
-6. `Sozlamalar` tabida keylar (kalit so'zlar), interval va qora/oq ro'yxatni sozlang. Sozlamalar avtomatik saqlanadi.
-7. `Natijalar` tabida avtomatik yoki qo'lda scan natijalarini ko'ring.
+1. Admin sifatida kirib, foydalanuvchi qo'shing (login, parol, kalitlar, havola).
+2. Foydalanuvchi o'z login/paroli bilan kiradi (yoki admin "Panelni ochish" bosadi).
+3. `Userbot` tabida "QR bilan akkaunt qo'shish" — Telegram ilovasidan QR skanerlanadi (2FA bo'lsa parol so'raladi).
+4. `Sozlamalar` tabida keylar (kalit so'zlar), interval va qora/oq ro'yxatni sozlang. Sozlamalar avtomatik saqlanadi.
+5. `Natijalar` tabida avtomatik yoki qo'lda scan natijalarini ko'ring.
 
 ## Manbalar
 

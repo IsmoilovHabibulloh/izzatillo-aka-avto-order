@@ -1,13 +1,20 @@
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::Client;
 use serde_json::Value;
+use std::sync::RwLock;
 
-#[derive(Clone)]
 pub struct SmmMainService {
-    api_key: String,
-    api_url: String,
+    /// Kalit va URL admin paneldan ishlayotgan paytda almashtiriladi, shuning
+    /// uchun qulf ichida; har chaqiruv boshida nusxasi olinadi.
+    creds: RwLock<SmmCreds>,
     service_id: u64,
     http: Client,
+}
+
+#[derive(Clone)]
+struct SmmCreds {
+    api_key: String,
+    api_url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -30,8 +37,7 @@ pub struct SmmStatusOutcome {
 impl SmmMainService {
     pub fn new(api_key: String, api_url: String, service_id: u64) -> Self {
         Self {
-            api_key,
-            api_url,
+            creds: RwLock::new(SmmCreds { api_key, api_url }),
             service_id,
             // reqwest default'da umumiy timeout yo'q — javob kelmasa skaner
             // abadiy kutib qolmasligi uchun aniq chegara qo'yamiz.
@@ -43,8 +49,23 @@ impl SmmMainService {
         }
     }
 
+    fn creds(&self) -> SmmCreds {
+        self.creds
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Admin paneldan kalit/URL o'zgarganda chaqiriladi (restart shart emas).
+    pub fn update(&self, api_key: String, api_url: String) {
+        *self
+            .creds
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = SmmCreds { api_key, api_url };
+    }
+
     pub fn is_configured(&self) -> bool {
-        !self.api_key.trim().is_empty()
+        !self.creds().api_key.trim().is_empty()
     }
 
     pub async fn send_order(
@@ -53,8 +74,9 @@ impl SmmMainService {
         link: &str,
         quantity: u64,
     ) -> Result<SmmOrderOutcome> {
-        if !self.is_configured() {
-            bail!("SMMMAIN_API_KEY .env ichida kiritilmagan");
+        let creds = self.creds();
+        if creds.api_key.trim().is_empty() {
+            bail!("SMM API kaliti kiritilmagan (admin panelda sozlanadi)");
         }
 
         let service = if service_id == 0 {
@@ -65,7 +87,7 @@ impl SmmMainService {
         .to_string();
         let quantity = quantity.to_string();
         let form = [
-            ("key", self.api_key.trim()),
+            ("key", creds.api_key.trim()),
             ("action", "add"),
             ("service", service.as_str()),
             ("link", link.trim()),
@@ -74,7 +96,7 @@ impl SmmMainService {
 
         let response = self
             .http
-            .post(self.api_url.trim())
+            .post(creds.api_url.trim())
             .form(&form)
             .send()
             .await
@@ -115,19 +137,20 @@ impl SmmMainService {
 
     /// Berilgan order id holatini smmmain.com `status` action orqali oladi.
     pub async fn order_status(&self, order_id: &str) -> Result<SmmStatusOutcome> {
-        if !self.is_configured() {
-            bail!("SMMMAIN_API_KEY .env ichida kiritilmagan");
+        let creds = self.creds();
+        if creds.api_key.trim().is_empty() {
+            bail!("SMM API kaliti kiritilmagan (admin panelda sozlanadi)");
         }
 
         let form = [
-            ("key", self.api_key.trim()),
+            ("key", creds.api_key.trim()),
             ("action", "status"),
             ("order", order_id.trim()),
         ];
 
         let response = self
             .http
-            .post(self.api_url.trim())
+            .post(creds.api_url.trim())
             .form(&form)
             .send()
             .await
@@ -156,14 +179,15 @@ impl SmmMainService {
     }
 
     pub async fn balance(&self) -> Result<SmmBalanceOutcome> {
-        if !self.is_configured() {
-            bail!("SMMMAIN_API_KEY .env ichida kiritilmagan");
+        let creds = self.creds();
+        if creds.api_key.trim().is_empty() {
+            bail!("SMM API kaliti kiritilmagan (admin panelda sozlanadi)");
         }
 
-        let form = [("key", self.api_key.trim()), ("action", "balance")];
+        let form = [("key", creds.api_key.trim()), ("action", "balance")];
         let response = self
             .http
-            .post(self.api_url.trim())
+            .post(creds.api_url.trim())
             .form(&form)
             .send()
             .await

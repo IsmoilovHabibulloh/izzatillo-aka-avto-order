@@ -8,11 +8,31 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tokio::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{Mutex, RwLock};
 
 pub struct Store {
     path: PathBuf,
     inner: RwLock<PersistedState>,
+    /// Saqlashlarni navbatga qo'yadi: ikki parallel save bir xil `.tmp` faylga
+    /// yozib, bir-birining ustidan eski holatni yozib ketmasligi uchun.
+    save_lock: Mutex<()>,
+    /// Tenant o'chirilgandan keyin diskka boshqa yozilmaydi.
+    closed: AtomicBool,
+}
+
+/// Admin ro'yxati uchun yengil ko'rsatkichlar (natija/loglarni klonlamasdan).
+#[derive(Clone, Debug, Default)]
+pub struct StoreSummary {
+    pub scanner_enabled: bool,
+    pub keywords_total: usize,
+    pub keywords_enabled: usize,
+    pub accounts_total: usize,
+    pub accounts_flooded: usize,
+    pub results_total: usize,
+    pub logs_total: usize,
+    pub telegram_api_id: Option<i32>,
+    pub telegram_api_hash: Option<String>,
 }
 
 impl Store {
@@ -37,7 +57,40 @@ impl Store {
         Ok(Self {
             path,
             inner: RwLock::new(state),
+            save_lock: Mutex::new(()),
+            closed: AtomicBool::new(false),
         })
+    }
+
+    /// Bundan keyin diskka yozishni to'xtatadi. Davom etayotgan save tugashini
+    /// kutadi, shuning uchun qaytgandan keyin faylni xavfsiz ko'chirish mumkin.
+    pub async fn close(&self) {
+        let _guard = self.save_lock.lock().await;
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    pub async fn summary(&self, now: DateTime<Utc>) -> StoreSummary {
+        let state = self.inner.read().await;
+        StoreSummary {
+            scanner_enabled: state.settings.enabled,
+            keywords_total: state.settings.keyword_rules.len(),
+            keywords_enabled: state
+                .settings
+                .keyword_rules
+                .iter()
+                .filter(|rule| rule.enabled)
+                .count(),
+            accounts_total: state.accounts.len(),
+            accounts_flooded: state
+                .accounts
+                .iter()
+                .filter(|account| account.flood_until.map(|until| until > now).unwrap_or(false))
+                .count(),
+            results_total: state.results.len(),
+            logs_total: state.logs.len(),
+            telegram_api_id: state.telegram.api_id,
+            telegram_api_hash: state.telegram.api_hash.clone(),
+        }
     }
 
     pub async fn snapshot(&self) -> PersistedState {
@@ -358,6 +411,10 @@ impl Store {
     }
 
     async fn save(&self) -> Result<()> {
+        let _guard = self.save_lock.lock().await;
+        if self.closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let state = self.inner.read().await.clone();
         let raw = serde_json::to_vec_pretty(&state)?;
         let tmp = self.path.with_extension("json.tmp");

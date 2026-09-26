@@ -30,9 +30,9 @@ import {
 } from '@mui/material';
 import { alpha, useTheme, type Theme } from '@mui/material/styles';
 import {
+  ArrowLeft,
   CircleCheck,
   CircleOff,
-  KeyRound,
   LogOut,
   Play,
   Plus,
@@ -54,8 +54,11 @@ import {
   QrPollResponse,
   QrStartResponse,
   SmmBalance,
-  apiFetch
+  apiFetch,
+  isMaintenanceError
 } from './api';
+import MaintenanceScreen from './Maintenance';
+import type { AdminView } from './Root';
 
 const emptySettings: Settings = {
   enabled: true,
@@ -69,14 +72,21 @@ const emptySettings: Settings = {
   max_results: 500
 };
 
-function App() {
+type AppProps = {
+  token: string;
+  // Admin paneldan ochilgan bo'lsa — kimning paneli (banner uchun).
+  adminView: AdminView | null;
+  // Sessiya tugadi (chiqish yoki 401) — Root login/admin ekraniga qaytaradi.
+  onSessionEnd: () => void;
+};
+
+function App({ token, adminView, onSessionEnd }: AppProps) {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
 
-  const [token, setToken] = useState(() => localStorage.getItem('vipads_token'));
-  const [loginUsername, setLoginUsername] = useState('Izzatillo');
-  const [loginPassword, setLoginPassword] = useState('');
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  // Profilaktika matni: null bo'lmasa panel o'rniga profilaktika ekrani chiqadi.
+  const [maintenance, setMaintenance] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(emptySettings);
   const [tab, setTab] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -111,23 +121,37 @@ function App() {
     dirtyRef.current = false;
   }, []);
 
+  // Root har renderda yangi funksiya beradi — callbacklar (va poll) qayta
+  // yaralmasligi uchun ref orqali chaqiramiz.
+  const onSessionEndRef = useRef(onSessionEnd);
+  useEffect(() => {
+    onSessionEndRef.current = onSessionEnd;
+  }, [onSessionEnd]);
+
   const handleAuthError = useCallback((err: unknown): boolean => {
     if (err instanceof ApiError && err.status === 401) {
-      localStorage.removeItem('vipads_token');
-      setToken(null);
       setDashboard(null);
       initializedRef.current = false;
+      onSessionEndRef.current();
+      return true;
+    }
+    // Admin profilaktika yoqdi — panel yopiladi, fonda qaytishini kutamiz.
+    // Saqlanmagan qoralama tashlanadi: profilaktika paytida admin sozlamalarni
+    // o'zgartirgan bo'lishi mumkin, qaytganda serverdagi nusxa yuklanadi.
+    if (isMaintenanceError(err)) {
+      dirtyRef.current = false;
+      setMaintenance(err.message);
       return true;
     }
     return false;
   }, []);
 
   const refresh = useCallback(async () => {
-    if (!token) return;
     setLoading(true);
     try {
       const data = await apiFetch<Dashboard>('/dashboard', token);
       setDashboard(data);
+      setMaintenance(null);
       // Saqlanmagan tahrir bo'lmasagina draft sozlamalarni serverdan yangilaymiz.
       if (!dirtyRef.current) {
         setSettings(normalizeSettings(data.settings));
@@ -150,41 +174,14 @@ function App() {
 
   // Poll cadence serverdagi interval'ga bog'lanadi (draft maydonga emas), shuning
   // uchun interval maydonini yozayotganda timer qayta-qayta yaralmaydi.
+  // Profilaktikada har 15 soniyada tekshiramiz — tugashi bilan panel qaytadi.
   const serverInterval = dashboard?.settings.interval_seconds ?? 5;
+  const inMaintenance = maintenance !== null;
   useEffect(() => {
-    if (!token) return;
-    const seconds = Math.max(2, serverInterval || 5);
+    const seconds = inMaintenance ? 15 : Math.max(2, serverInterval || 5);
     const id = window.setInterval(refresh, seconds * 1000);
     return () => window.clearInterval(id);
-  }, [token, refresh, serverInterval]);
-
-  const saveToken = (value: string | null) => {
-    if (value) {
-      localStorage.setItem('vipads_token', value);
-    } else {
-      localStorage.removeItem('vipads_token');
-    }
-    setToken(value);
-  };
-
-  const handleLogin = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const data = await apiFetch<{ token: string }>('/auth/login', null, {
-        method: 'POST',
-        body: JSON.stringify({ username: loginUsername, password: loginPassword })
-      });
-      initializedRef.current = false;
-      saveToken(data.token);
-      setLoginPassword('');
-      setNotice('Kirish muvaffaqiyatli');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login xato');
-    } finally {
-      setBusy(false);
-    }
-  };
+  }, [refresh, serverInterval, inMaintenance]);
 
   const logout = async () => {
     try {
@@ -194,7 +191,7 @@ function App() {
     }
     initializedRef.current = false;
     setDashboard(null);
-    saveToken(null);
+    onSessionEndRef.current();
   };
 
   const editSettings = useCallback(
@@ -412,53 +409,8 @@ function App() {
     }
   };
 
-  if (!token) {
-    return (
-      <Box
-        className="panel-shell"
-        sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center', p: 2 }}
-      >
-        <Paper
-          sx={{ width: '100%', maxWidth: 420, p: { xs: 2.5, sm: 4 }, borderTop: '4px solid #FFC107' }}
-        >
-          <Stack spacing={2.5}>
-            <Box>
-              <Typography variant="h4" color="primary">
-                VIP Ads
-              </Typography>
-              <Typography color="text.secondary">Admin panel</Typography>
-            </Box>
-            {error && <Alert severity="error">{error}</Alert>}
-            <TextField
-              label="Login"
-              value={loginUsername}
-              onChange={(event) => setLoginUsername(event.target.value)}
-              fullWidth
-            />
-            <TextField
-              label="Parol"
-              type="password"
-              value={loginPassword}
-              onChange={(event) => setLoginPassword(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') handleLogin();
-              }}
-              fullWidth
-            />
-            <Button
-              variant="contained"
-              color="primary"
-              onClick={handleLogin}
-              disabled={busy}
-              size="large"
-              startIcon={busy ? <CircularProgress size={16} color="inherit" /> : <KeyRound size={18} />}
-            >
-              Kirish
-            </Button>
-          </Stack>
-        </Paper>
-      </Box>
-    );
+  if (maintenance !== null) {
+    return <MaintenanceScreen message={maintenance} onLogout={logout} />;
   }
 
   const connected = Boolean(dashboard?.status.telegram_connected);
@@ -473,7 +425,9 @@ function App() {
               VIP Ads
             </Typography>
             <Typography variant="caption" sx={{ opacity: 0.8 }} noWrap>
-              avto-order.vipads.uz
+              {dashboard?.display_name
+                ? `${dashboard.display_name} · avto-order.vipads.uz`
+                : 'avto-order.vipads.uz'}
             </Typography>
           </Box>
           <Tooltip title="Yangilash">
@@ -483,9 +437,9 @@ function App() {
               </IconButton>
             </span>
           </Tooltip>
-          <Tooltip title="Chiqish">
+          <Tooltip title={adminView ? 'Admin panelga qaytish' : 'Chiqish'}>
             <IconButton color="inherit" onClick={logout}>
-              <LogOut size={20} />
+              {adminView ? <ArrowLeft size={20} /> : <LogOut size={20} />}
             </IconButton>
           </Tooltip>
         </Toolbar>
@@ -508,6 +462,25 @@ function App() {
 
       <Container maxWidth="xl" sx={{ py: { xs: 2, md: 3 }, px: { xs: 1.5, sm: 2, md: 3 } }}>
         <Stack spacing={2}>
+          {adminView && (
+            <Alert
+              severity={dashboard?.maintenance ? 'warning' : 'info'}
+              action={
+                <Button color="inherit" size="small" onClick={logout} startIcon={<ArrowLeft size={16} />}>
+                  Admin panel
+                </Button>
+              }
+            >
+              <Typography variant="body2" sx={{ fontWeight: 800 }}>
+                Admin sifatida: {adminView.displayName} paneli
+              </Typography>
+              {dashboard?.maintenance && (
+                <Typography variant="body2">
+                  Bu foydalanuvchi profilaktikada — u panelni ko'rmayapti, skaner va orderlar pauzada.
+                </Typography>
+              )}
+            </Alert>
+          )}
           {(error || notice || dashboard?.status.last_error) && (
             <Stack spacing={1}>
               {error && (
@@ -528,6 +501,7 @@ function App() {
 
           <ScannerControl
             scannerOn={scannerOn}
+            paused={Boolean(dashboard?.maintenance)}
             scanning={Boolean(dashboard?.status.scanning)}
             busy={busy}
             onStart={() => setScannerEnabled(true)}
@@ -746,6 +720,7 @@ function StatusChip({ ok, label }: { ok: boolean; label: string }) {
 
 function ScannerControl({
   scannerOn,
+  paused,
   scanning,
   busy,
   onStart,
@@ -753,6 +728,9 @@ function ScannerControl({
   onRunNow
 }: {
   scannerOn: boolean;
+  // Profilaktika (faqat admin orqali ochilgan panelda ko'rinadi): sozlama
+  // yoqilgan bo'lsa ham skaner ishlamaydi.
+  paused: boolean;
   scanning: boolean;
   busy: boolean;
   onStart: () => void;
@@ -769,7 +747,15 @@ function ScannerControl({
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
           <Chip
             color={scannerOn ? 'secondary' : 'default'}
-            label={scannerOn ? (scanning ? 'Tekshiryapti' : 'Yoqilgan') : "To'xtagan"}
+            label={
+              paused
+                ? 'Pauzada (profilaktika)'
+                : scannerOn
+                  ? scanning
+                    ? 'Tekshiryapti'
+                    : 'Yoqilgan'
+                  : "To'xtagan"
+            }
             icon={scannerOn ? <CircleCheck size={16} /> : <CircleOff size={16} />}
             sx={{ fontWeight: 800 }}
           />
@@ -955,13 +941,15 @@ function StatsBar({ dashboard, loading }: { dashboard: Dashboard | null; loading
     ['Keyingi scan', formatDate(status?.next_run_at)],
     [
       'Holat',
-      !dashboard?.settings.enabled
-        ? "To'xtagan"
-        : status?.scanning
-          ? 'Tekshiryapti'
-          : loading
-            ? 'Yuklanmoqda'
-            : 'Yoqilgan'
+      dashboard?.maintenance
+        ? 'Pauzada'
+        : !dashboard?.settings.enabled
+          ? "To'xtagan"
+          : status?.scanning
+            ? 'Tekshiryapti'
+            : loading
+              ? 'Yuklanmoqda'
+              : 'Yoqilgan'
     ]
   ];
 
@@ -2167,7 +2155,7 @@ function LevelChip({ level }: { level: string }) {
   );
 }
 
-function FieldRow({ label, children }: { label: string; children: ReactNode }) {
+export function FieldRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'baseline' }}>
       <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
@@ -2186,7 +2174,7 @@ function FieldRow({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function EmptyHint({ text }: { text: string }) {
+export function EmptyHint({ text }: { text: string }) {
   return (
     <Box
       sx={{
@@ -2267,7 +2255,7 @@ function rowToneSx(tone: Tone) {
   return {};
 }
 
-function formatDate(value?: string | null) {
+export function formatDate(value?: string | null) {
   if (!value) return '-';
   return new Date(value).toLocaleString('uz-UZ', {
     month: '2-digit',

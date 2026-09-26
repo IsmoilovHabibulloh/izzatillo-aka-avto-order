@@ -9,6 +9,7 @@ use grammers_tl_types::{self as tl, Deserializable, Serializable};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration as TokioDuration, timeout};
@@ -31,6 +32,8 @@ pub struct TelegramService {
     session_dir: PathBuf,
     clients: Mutex<HashMap<String, ActiveClient>>,
     pending: Mutex<HashMap<String, PendingQr>>,
+    /// Tenant o'chirilgan: yangi ulanish ochilmaydi, sessiya papkasi qayta yaratilmaydi.
+    closed: AtomicBool,
 }
 
 struct ActiveClient {
@@ -72,6 +75,7 @@ impl TelegramService {
             session_dir,
             clients: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -119,6 +123,12 @@ impl TelegramService {
         }
 
         let mut clients = self.clients.lock().await;
+        // Qulf ostida tekshiriladi: close() bayroqni qulfdan oldin qo'yadi, shuning
+        // uchun bu yerda qo'shilgan klient yo shu tekshiruvda, yo close()da uziladi.
+        if self.is_closed() {
+            runner.abort();
+            bail!("Foydalanuvchi o'chirilgan");
+        }
         if let Some(old) = clients.insert(
             account_id.to_string(),
             ActiveClient {
@@ -184,7 +194,12 @@ impl TelegramService {
             Ok(tl::enums::auth::LoginToken::Token(token)) => {
                 let qr_url = token_to_url(&token.token);
                 let expires_at = ts_to_dt(token.expires);
-                self.pending.lock().await.insert(
+                let mut pending = self.pending.lock().await;
+                if self.is_closed() {
+                    runner.abort();
+                    bail!("Foydalanuvchi o'chirilgan");
+                }
+                pending.insert(
                     account_id.to_string(),
                     PendingQr {
                         client,
@@ -354,6 +369,22 @@ impl TelegramService {
         self.cancel_qr(account_id).await;
     }
 
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Tenant o'chirilganda: barcha akkauntlar (va kutilayotgan QR loginlar)
+    /// uziladi, yangi ulanish ochilmaydi. Sessiya fayllari diskda qoladi.
+    pub async fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        for (_, active) in self.clients.lock().await.drain() {
+            active.runner.abort();
+        }
+        for (_, pending) in self.pending.lock().await.drain() {
+            pending.runner.abort();
+        }
+    }
+
     /// Akkaunt sessiyasini (fayllarini) o'chiradi.
     pub async fn remove_account_session(&self, account_id: &str) -> Result<()> {
         self.disconnect_account(account_id).await;
@@ -394,6 +425,10 @@ impl TelegramService {
             _ => None,
         };
         let mut clients = self.clients.lock().await;
+        if self.is_closed() {
+            pending.runner.abort();
+            return None;
+        }
         if let Some(old) = clients.insert(
             account_id.to_string(),
             ActiveClient {
@@ -411,6 +446,9 @@ impl TelegramService {
         api_id: i32,
         session_path: &Path,
     ) -> Result<(Client, SenderPoolFatHandle, Arc<SqliteSession>, JoinHandle<()>)> {
+        if self.is_closed() {
+            bail!("Foydalanuvchi o'chirilgan");
+        }
         if let Some(parent) = session_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }

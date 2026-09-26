@@ -300,16 +300,29 @@ pub struct LoginRequest {
 #[derive(Clone, Debug, Serialize)]
 pub struct LoginResponse {
     pub token: String,
+    /// "admin" | "tenant"
+    pub role: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct MeResponse {
+    /// "admin" | "tenant"
+    pub role: String,
     pub username: String,
+    pub tenant_id: Option<String>,
+    pub display_name: Option<String>,
+    /// Admin paneldan "Panelni ochish" orqali kirilgan sessiya.
+    pub via_admin: bool,
+    pub maintenance: bool,
+    pub maintenance_message: Option<String>,
+    pub maintenance_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -331,6 +344,10 @@ pub struct DashboardResponse {
     pub accounts: Vec<AccountStatus>,
     pub stats_24h: Vec<KeywordStat>,
     pub userbot_url: String,
+    pub display_name: String,
+    /// Faqat admin orqali ochilgan panelda true bo'lishi mumkin (oddiy
+    /// foydalanuvchi profilaktikada panelni umuman ko'rmaydi).
+    pub maintenance: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

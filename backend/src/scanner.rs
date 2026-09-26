@@ -28,6 +28,9 @@ const ORDER_RECHECK_MINUTES: i64 = 10;
 
 pub async fn scanner_loop(state: TenantState) {
     loop {
+        if state.is_stopped() {
+            break;
+        }
         let interval = state.store.settings().await.interval_seconds.max(2);
         {
             let mut runtime = state.runtime.write().await;
@@ -35,6 +38,17 @@ pub async fn scanner_loop(state: TenantState) {
         }
 
         sleep(TokioDuration::from_secs(interval)).await;
+
+        if state.is_stopped() {
+            info!(tenant = %state.id, "skaner sikli to'xtadi (foydalanuvchi o'chirildi)");
+            break;
+        }
+        // Profilaktika: skaner pauzada. Foydalanuvchi sozlamalariga (yoqilgan/
+        // o'chiq, keylar, navbat) tegmaymiz — admin ish holatiga qaytarishi bilan
+        // keyingi siklda qolgan joyidan davom etadi.
+        if state.in_maintenance().await {
+            continue;
+        }
 
         let settings = state.store.settings().await;
         if !settings.enabled {
@@ -65,6 +79,14 @@ async fn scan_due(state: TenantState) -> Result<ScanResponse> {
 }
 
 async fn scan_with_mode(state: TenantState, force: bool) -> Result<ScanResponse> {
+    if state.should_pause().await {
+        return Ok(ScanResponse {
+            added: 0,
+            checked_channels: 0,
+            checked_keywords: 0,
+            message: "Profilaktika: skaner pauzada".to_string(),
+        });
+    }
     {
         let mut runtime = state.runtime.write().await;
         if runtime.scanning {
@@ -160,6 +182,9 @@ async fn scan_inner(state: &TenantState, force: bool) -> Result<ScanResponse> {
     let mut scan_logs = vec![start_log];
 
     for query in &keywords {
+        if state.should_pause().await {
+            return Ok(abort_for_maintenance(state, &keywords).await);
+        }
         // Har key uchun navbatdagi (round-robin) sog'lom akkauntni tanlaymiz.
         // FLOOD_WAIT bo'lsa, o'sha akkaunt "dam oladi" va keyingisiga o'tamiz.
         let mut attempts = 0usize;
@@ -178,6 +203,9 @@ async fn scan_inner(state: &TenantState, force: bool) -> Result<ScanResponse> {
                 break;
             }
             attempts += 1;
+            if state.is_stopped() {
+                break;
+            }
 
             let idx = state.rr.fetch_add(1, Ordering::Relaxed) % accounts.len();
             let account = &accounts[idx];
@@ -248,6 +276,10 @@ async fn scan_inner(state: &TenantState, force: bool) -> Result<ScanResponse> {
         }
     }
 
+    if state.should_pause().await {
+        return Ok(abort_for_maintenance(state, &keywords).await);
+    }
+
     // Natijalarni saqlash xato bersa ham, shu paytgacha to'plangan loglar
     // (kanal xatolari) yo'qolmasligi uchun ularni avval flush qilamiz.
     let added_items = match state.store.push_results(collected.clone()).await {
@@ -263,8 +295,21 @@ async fn scan_inner(state: &TenantState, force: bool) -> Result<ScanResponse> {
         }
     };
 
-    let action_logs = process_scan_actions(state, &settings, &collected, &added_items).await;
+    let (action_logs, orders_paused) =
+        process_scan_actions(state, &settings, &collected, &added_items).await;
     scan_logs.extend(action_logs);
+    if orders_paused {
+        // Orderlar yarim yo'lda to'xtadi: keylar "tekshirildi" deb belgilanmaydi —
+        // ishga qaytgach darhol qayta skanerlanadi va qolgan orderlar yuboriladi
+        // (yuborilganlari order yozuvlari tufayli takrorlanmaydi).
+        state.store.push_logs(scan_logs).await?;
+        return Ok(ScanResponse {
+            added: added_items.len(),
+            checked_channels: 0,
+            checked_keywords: 0,
+            message: "Profilaktika: orderlar to'xtatildi".to_string(),
+        });
+    }
 
     // 24 soatlik statistika: har topilmaning har bir mos kalit so'ziga bittadan event.
     let appearances: Vec<(String, String, Option<String>)> = collected
@@ -316,6 +361,26 @@ async fn scan_inner(state: &TenantState, force: bool) -> Result<ScanResponse> {
     })
 }
 
+/// Scan davomida profilaktika yoqildi: hech narsa saqlanmaydi va keylar
+/// "tekshirildi" deb belgilanmaydi — ish holatiga qaytgach aynan shu keylar
+/// qaytadan tekshiriladi (qolgan joyidan davom etadi).
+async fn abort_for_maintenance(state: &TenantState, keywords: &[String]) -> ScanResponse {
+    let mut log = PanelLog::new(
+        "warning",
+        "Scan to'xtatildi: profilaktika",
+        "Profilaktika yoqilgani uchun scan to'xtatildi. Ish holatiga qaytgach shu keylar qayta tekshiriladi.",
+    );
+    log.keyword = Some(keywords.join(", "));
+    log.source_channel = Some("Global qidiruv".to_string());
+    let _ = state.store.push_logs(vec![log]).await;
+    ScanResponse {
+        added: 0,
+        checked_channels: 0,
+        checked_keywords: 0,
+        message: "Profilaktika: scan to'xtatildi".to_string(),
+    }
+}
+
 /// Order yuborish-yubormaslik qarori. String — sabab (log uchun).
 enum OrderDecision {
     /// Order (qayta) yuborilsin.
@@ -324,13 +389,15 @@ enum OrderDecision {
     Wait(String),
 }
 
+/// Qaytaradi: loglar va orderlar profilaktika sababli to'xtatilganmi.
 async fn process_scan_actions(
     state: &TenantState,
     settings: &Settings,
     collected: &[AdResult],
     added: &[AdResult],
-) -> Vec<PanelLog> {
+) -> (Vec<PanelLog>, bool) {
     let mut logs = Vec::new();
+    let mut paused = false;
     let now = Utc::now();
 
     // 1) Yangi topilgan, lekin order chiqarmaydigan reklamalar uchun bir martalik
@@ -397,7 +464,7 @@ async fn process_scan_actions(
     //    oldingi order holatiga qarab qayta yuborilishi mumkin.
     let mut handled_links: HashSet<String> = HashSet::new();
 
-    for ad in collected {
+    'ads: for ad in collected {
         let target = ad
             .target_channel
             .clone()
@@ -417,6 +484,14 @@ async fn process_scan_actions(
                 continue;
             }
 
+            // Profilaktika yoqildi — qolgan orderlar yuborilmaydi. Reklama
+            // keyingi scanda yana topiladi va order o'shanda yuboriladi.
+            if state.should_pause().await {
+                logs.push(orders_paused_log());
+                paused = true;
+                break 'ads;
+            }
+
             let record = state.store.order_record(&order_key.text).await;
             match decide_order(state, &record, now).await {
                 OrderDecision::Wait(reason) => {
@@ -425,6 +500,13 @@ async fn process_scan_actions(
                     info!(link = %order_key.text, reason = %reason, "order kutilyapti");
                 }
                 OrderDecision::Place(reason) => {
+                    // decide_order SMM status so'rovini kutgan bo'lishi mumkin —
+                    // shu orada profilaktika yoqilgan bo'lsa, pul sarflanmasin.
+                    if state.should_pause().await {
+                        logs.push(orders_paused_log());
+                        paused = true;
+                        break 'ads;
+                    }
                     let mut log = base_ad_log(
                         "info",
                         "Order yuborilmoqda",
@@ -505,7 +587,17 @@ async fn process_scan_actions(
         }
     }
 
-    logs
+    (logs, paused)
+}
+
+fn orders_paused_log() -> PanelLog {
+    let mut log = PanelLog::new(
+        "warning",
+        "Orderlar to'xtatildi: profilaktika",
+        "Profilaktika yoqilgani uchun qolgan orderlar yuborilmadi. Ish holatiga qaytgach keyingi scanda davom etadi.",
+    );
+    log.source_channel = Some("Admin panel".to_string());
+    log
 }
 
 /// Berilgan link uchun order (qayta) yuborilishini hal qiladi (foydalanuvchi spec'i):
