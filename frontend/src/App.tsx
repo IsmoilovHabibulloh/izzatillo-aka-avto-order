@@ -347,20 +347,43 @@ function App({ token, adminView, onSessionEnd, onAdminSession }: AppProps) {
     void commitSettings(next, "Key o'chirildi");
   };
 
+  // Kanal faqat bitta ro'yxatda turadi: oq ro'yxatga qo'shilgani qora ro'yxatdan
+  // chiqadi (va aksincha). Backend ham shuni ta'minlaydi.
   const addListItem = (field: 'blacklist_channels' | 'whitelist_channels', value: string) => {
     const items = value
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean);
     if (!items.length) return;
+    const other = field === 'blacklist_channels' ? 'whitelist_channels' : 'blacklist_channels';
+    const current = settingsRef.current;
+    const present = new Set(current[field].map(normalizeChannelRef));
+    const fresh = items.filter((item) => {
+      const channel = normalizeChannelRef(item);
+      if (present.has(channel)) return false;
+      present.add(channel);
+      return true;
+    });
+    const moving = new Set(items.map(normalizeChannelRef).filter((channel) => channel !== null));
+    const kept = current[other].filter((item) => {
+      const channel = normalizeChannelRef(item);
+      return channel === null || !moving.has(channel);
+    });
+    const moved = kept.length < current[other].length;
     const next = {
-      ...settingsRef.current,
-      [field]: Array.from(new Set([...settingsRef.current[field], ...items]))
+      ...current,
+      [field]: [...current[field], ...fresh],
+      [other]: kept
     };
     setSettings(next);
     if (field === 'blacklist_channels') setBlacklistInput('');
     if (field === 'whitelist_channels') setWhitelistInput('');
-    void commitSettings(next, "Ro'yxat saqlandi");
+    const message = !moved
+      ? "Ro'yxat saqlandi"
+      : field === 'whitelist_channels'
+        ? "Oq ro'yxatga o'tkazildi (qora ro'yxatdan chiqarildi)"
+        : "Qora ro'yxatga o'tkazildi (oq ro'yxatdan chiqarildi)";
+    void commitSettings(next, message);
   };
 
   const removeListItem = (field: 'blacklist_channels' | 'whitelist_channels', value: string) => {
@@ -1111,6 +1134,7 @@ function SettingsPanel(props: SettingsPanelProps) {
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 2 }}>
         <ListEditor
           title="Qora ro'yxat (order shu kanallarga)"
+          hint="Oq ro'yxatda bo'lmagan har bir topilgan kanal, bot va profil shu yerga avtomatik qo'shiladi."
           placeholder="@kanal yoki t.me/kanal"
           value={blacklistInput}
           onChange={setBlacklistInput}
@@ -1121,6 +1145,7 @@ function SettingsPanel(props: SettingsPanelProps) {
 
         <ListEditor
           title="Oq ro'yxat (order yo'q)"
+          hint="Bu yerga qo'shilgan kanal qora ro'yxatdan avtomatik chiqariladi."
           placeholder="@kanal yoki t.me/kanal"
           value={whitelistInput}
           onChange={setWhitelistInput}
@@ -1419,6 +1444,7 @@ function RuleCard({
 
 function ListEditor({
   title,
+  hint,
   placeholder,
   value,
   onChange,
@@ -1427,6 +1453,7 @@ function ListEditor({
   onRemove
 }: {
   title: string;
+  hint: string;
   placeholder: string;
   value: string;
   onChange: (value: string) => void;
@@ -1436,7 +1463,14 @@ function ListEditor({
 }) {
   return (
     <Stack spacing={1.5}>
-      <Typography variant="h6">{title}</Typography>
+      <Box>
+        <Typography variant="h6">
+          {title} · {items.length}
+        </Typography>
+        <Typography variant="caption" color="text.secondary">
+          {hint}
+        </Typography>
+      </Box>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
         <TextField
           value={value}

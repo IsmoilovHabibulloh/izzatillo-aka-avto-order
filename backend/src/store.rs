@@ -54,12 +54,45 @@ impl Store {
         };
         state.settings = sanitize_settings(state.settings);
 
-        Ok(Self {
+        // Qoida eski natijalarga ham: ilgari topilgan, lekin hech bir ro'yxatda
+        // yo'q kanallar ham qora ro'yxatga o'tadi.
+        let targets: Vec<String> = state
+            .results
+            .iter()
+            .filter_map(|result| result.target_channel.clone())
+            .collect();
+        let backfilled = blacklist_unlisted(&mut state.settings, &targets);
+        if !backfilled.is_empty() {
+            let mut log = PanelLog::new(
+                "info",
+                "Qora ro'yxatga qo'shildi",
+                format!(
+                    "Oq ro'yxatda bo'lmagan {} ta oldin topilgan kanal avtomatik qora ro'yxatga qo'shildi.",
+                    backfilled.len()
+                ),
+            );
+            log.target_channel = Some(
+                backfilled
+                    .iter()
+                    .map(|channel| format!("@{channel}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            log.source_channel = Some("Avto qora ro'yxat".to_string());
+            state.logs.insert(0, log);
+            trim_logs(&mut state);
+        }
+
+        let store = Self {
             path,
             inner: RwLock::new(state),
             save_lock: Mutex::new(()),
             closed: AtomicBool::new(false),
-        })
+        };
+        if !backfilled.is_empty() {
+            store.save().await?;
+        }
+        Ok(store)
     }
 
     /// Bundan keyin diskka yozishni to'xtatadi. Davom etayotgan save tugashini
@@ -265,6 +298,20 @@ impl Store {
         out
     }
 
+    /// Topilgan kanallardan hech bir ro'yxatda yo'qlarini qora ro'yxatga qo'shadi.
+    /// Joriy (eng so'nggi) ro'yxatlar bilan ishlaydi — scan davomida paneldan
+    /// oq ro'yxatga qo'shilgan kanal qora ro'yxatga tushmaydi.
+    pub async fn auto_blacklist(&self, targets: &[String]) -> Result<Vec<String>> {
+        let added = {
+            let mut state = self.inner.write().await;
+            blacklist_unlisted(&mut state.settings, targets)
+        };
+        if !added.is_empty() {
+            self.save().await?;
+        }
+        Ok(added)
+    }
+
     pub async fn order_record(&self, link: &str) -> Option<OrderRecord> {
         let key = link.trim().to_lowercase();
         self.inner.read().await.orders.get(&key).cloned()
@@ -439,8 +486,14 @@ fn sanitize_settings(mut settings: Settings) -> Settings {
     );
     sync_legacy_keywords(&mut settings);
     settings.channels = normalize_list(settings.channels);
-    settings.blacklist_channels = normalize_list(settings.blacklist_channels);
-    settings.whitelist_channels = normalize_list(settings.whitelist_channels);
+    settings.whitelist_channels = dedupe_channels(normalize_list(settings.whitelist_channels));
+    // Kanal faqat bitta ro'yxatda turadi: oq ro'yxatga qo'shilgan kanal qora
+    // ro'yxatdan chiqariladi (oq ro'yxat ustun).
+    let white = channel_set(&settings.whitelist_channels);
+    settings.blacklist_channels = dedupe_channels(normalize_list(settings.blacklist_channels))
+        .into_iter()
+        .filter(|item| normalize_channel_ref(item).is_none_or(|channel| !white.contains(&channel)))
+        .collect();
     settings.order_quantity = settings.order_quantity.clamp(1, 1_000_000);
     settings
 }
@@ -454,6 +507,52 @@ fn normalize_list(items: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+/// Bir kanalning turli yozilishini ("@kanal", "https://t.me/Kanal") bitta deb
+/// hisoblab, birinchisini qoldiradi.
+fn dedupe_channels(items: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| normalize_channel_ref(item).is_none_or(|channel| seen.insert(channel)))
+        .collect()
+}
+
+fn channel_set(items: &[String]) -> HashSet<String> {
+    items
+        .iter()
+        .filter_map(|item| normalize_channel_ref(item))
+        .collect()
+}
+
+/// Butun tizim qoidasi: oq ro'yxatda bo'lmagan har bir topilgan kanal/bot/profil
+/// qora ro'yxatda turadi. Hali hech bir ro'yxatda bo'lmaganlarini qora ro'yxatga
+/// "@username" ko'rinishida qo'shadi va yangi qo'shilganlarini qaytaradi.
+fn blacklist_unlisted(settings: &mut Settings, targets: &[String]) -> Vec<String> {
+    let white = channel_set(&settings.whitelist_channels);
+    let mut black = channel_set(&settings.blacklist_channels);
+    let mut added = Vec::new();
+
+    for target in targets {
+        let Some(channel) = normalize_channel_ref(target) else {
+            continue;
+        };
+        // Faqat haqiqiy username (a-z, 0-9, _) — boshqa narsa ro'yxatga tushmasin.
+        if !channel
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        if white.contains(&channel) || !black.insert(channel.clone()) {
+            continue;
+        }
+        settings.blacklist_channels.push(format!("@{channel}"));
+        added.push(channel);
+    }
+
+    added
 }
 
 fn normalize_keyword_rules(
@@ -522,5 +621,134 @@ fn trim_logs(state: &mut PersistedState) {
     const MAX_LOGS: usize = 1000;
     if state.logs.len() > MAX_LOGS {
         state.logs.truncate(MAX_LOGS);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings_with(black: &[&str], white: &[&str]) -> Settings {
+        Settings {
+            blacklist_channels: black.iter().map(|item| item.to_string()).collect(),
+            whitelist_channels: white.iter().map(|item| item.to_string()).collect(),
+            ..Settings::default()
+        }
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn whitelisting_moves_channel_out_of_blacklist() {
+        let clean = sanitize_settings(settings_with(
+            &["@Foo_Channel", "https://t.me/bar", "@baz"],
+            &["https://t.me/foo_channel"],
+        ));
+        assert_eq!(clean.blacklist_channels, strings(&["https://t.me/bar", "@baz"]));
+        assert_eq!(clean.whitelist_channels, strings(&["https://t.me/foo_channel"]));
+    }
+
+    #[test]
+    fn one_channel_written_differently_is_kept_once() {
+        let clean = sanitize_settings(settings_with(
+            &["@bar", "https://t.me/Bar", "t.me/bar?start=1"],
+            &[],
+        ));
+        assert_eq!(clean.blacklist_channels, strings(&["@bar"]));
+    }
+
+    #[test]
+    fn unlisted_found_channels_go_to_blacklist() {
+        let mut settings = settings_with(&["@known_black"], &["https://t.me/u1xbet_apt1"]);
+        let targets = strings(&[
+            "u1xbet_apt1",
+            "Known_Black",
+            "football_news_daily9",
+            "official_onexbet_links_bot",
+            "football_news_daily9",
+            "bad name",
+            "",
+        ]);
+        let added = blacklist_unlisted(&mut settings, &targets);
+        assert_eq!(
+            added,
+            strings(&["football_news_daily9", "official_onexbet_links_bot"])
+        );
+        assert_eq!(
+            settings.blacklist_channels,
+            strings(&[
+                "@known_black",
+                "@football_news_daily9",
+                "@official_onexbet_links_bot"
+            ])
+        );
+        assert_eq!(settings.whitelist_channels, strings(&["https://t.me/u1xbet_apt1"]));
+    }
+
+    fn result_for(channel: &str) -> AdResult {
+        AdResult {
+            id: channel.to_string(),
+            fingerprint: format!("1xbet:{channel}"),
+            channel: channel.to_string(),
+            channel_title: None,
+            target_channel: Some(channel.to_string()),
+            matched_keywords: vec!["1xbet".to_string()],
+            title: String::new(),
+            message: String::new(),
+            url: format!("https://t.me/{channel}"),
+            button_text: String::new(),
+            sponsor_info: None,
+            additional_info: None,
+            recommended: false,
+            random_id_hex: String::new(),
+            found_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_blacklists_earlier_results_once() {
+        let dir = std::env::temp_dir().join(format!("vipads-store-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("state.json");
+        let mut state = PersistedState::default();
+        state.settings = settings_with(&["@old_black"], &["https://t.me/own_channel"]);
+        state.results = vec![
+            result_for("own_channel"),
+            result_for("old_black"),
+            result_for("rival_channel"),
+        ];
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(&path, serde_json::to_vec(&state).unwrap())
+            .await
+            .unwrap();
+
+        let store = Store::load(&path).await.unwrap();
+        let settings = store.settings().await;
+        assert_eq!(
+            settings.blacklist_channels,
+            strings(&["@old_black", "@rival_channel"])
+        );
+        assert_eq!(settings.whitelist_channels, strings(&["https://t.me/own_channel"]));
+        let logs = store.snapshot().await.logs;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].target_channel.as_deref(), Some("@rival_channel"));
+
+        // Saqlangan: qayta yuklashda yana qo'shilmaydi, log takrorlanmaydi.
+        drop(store);
+        let again = Store::load(&path).await.unwrap();
+        assert_eq!(
+            again.settings().await.blacklist_channels,
+            strings(&["@old_black", "@rival_channel"])
+        );
+        assert_eq!(again.snapshot().await.logs.len(), 1);
+
+        let added = again
+            .auto_blacklist(&strings(&["own_channel", "new_rival", "rival_channel"]))
+            .await
+            .unwrap();
+        assert_eq!(added, strings(&["new_rival"]));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

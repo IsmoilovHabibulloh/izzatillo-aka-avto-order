@@ -37,6 +37,8 @@ Admin istalgan foydalanuvchini (yoki tanlanganlarni) profilaktikaga o'tkazadi:
 
 Har bir key Telegram serveriga `contacts.getSponsoredPeers` orqali global qidiruv query sifatida yuboriladi. Server o'sha query bo'yicha sponsored kanallarni qaytaradi; topilgan kanal qora ro'yxatga mos kelsa SMM order yuboriladi (oq ro'yxat bo'lsa — yo'q).
 
+Ro'yxatlar qoidasi (hamma foydalanuvchiga): oq ro'yxatda bo'lmagan har bir topilgan kanal/bot/profil avtomatik qora ro'yxatga qo'shiladi va order shu scanning o'zida ketadi. Kanal oq ro'yxatga qo'shilsa, qora ro'yxatdan chiqariladi (oq ro'yxat har doim ustun). Server ishga tushganda oldingi natijalardagi ro'yxatsiz kanallar ham qora ro'yxatga o'tkaziladi.
+
 Bir xil reklama qayta topilsa, oldingi order holati tekshiriladi: bajarilgan bo'lsa qayta yuboriladi, bajarilmagan bo'lsa kutiladi; 10 daqiqada ham bajarilmasa baribir qayta yuboriladi.
 
 Telegramning ichki MTProto holatlari va server tomondagi barcha hisob-kitoblarini yashirish kafolatlanmaydi. Bot faqat sponsored qidiruv natijasini oladi va ko'rildi/click/report requestlarini yubormaydi.

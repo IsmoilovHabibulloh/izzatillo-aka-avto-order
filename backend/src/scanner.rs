@@ -295,6 +295,42 @@ async fn scan_inner(state: &TenantState, force: bool) -> Result<ScanResponse> {
         }
     };
 
+    // Butun tizim qoidasi: oq ro'yxatda bo'lmagan har bir topilgan kanal/bot/profil
+    // qora ro'yxatda. Yangilari avtomatik qo'shiladi va order shu scanning o'zida ketadi.
+    let targets: Vec<String> = collected
+        .iter()
+        .filter_map(|ad| ad.target_channel.clone())
+        .collect();
+    match state.store.auto_blacklist(&targets).await {
+        Ok(new_channels) => {
+            for channel in new_channels {
+                let mut log = PanelLog::new(
+                    "info",
+                    "Qora ro'yxatga qo'shildi",
+                    format!("@{channel} oq ro'yxatda yo'q — avtomatik qora ro'yxatga qo'shildi."),
+                );
+                if let Some(ad) = collected.iter().find(|ad| {
+                    ad.target_channel.as_deref().and_then(normalize_channel_ref).as_deref()
+                        == Some(channel.as_str())
+                }) {
+                    log.keyword = Some(ad.matched_keywords.join(", "));
+                    log.ad_url = Some(ad.url.clone());
+                }
+                log.target_channel = Some(format!("@{channel}"));
+                log.source_channel = Some("Avto qora ro'yxat".to_string());
+                scan_logs.push(log);
+            }
+        }
+        Err(err) => scan_logs.push(PanelLog::new(
+            "error",
+            "Qora ro'yxatni saqlashda xato",
+            err.to_string(),
+        )),
+    }
+    // Order qarori eng so'nggi ro'yxatlar bilan (yangi qora kanallar, paneldan
+    // hozirgina oq ro'yxatga o'tkazilganlar) qilinadi.
+    let settings = state.store.settings().await;
+
     let (action_logs, orders_paused) =
         process_scan_actions(state, &settings, &collected, &added_items).await;
     scan_logs.extend(action_logs);
@@ -858,4 +894,21 @@ fn order_key_from_rule(rule: &KeywordRule) -> Option<OrderKey> {
         service_id: rule.service_id.max(1),
         quantity: rule.order_quantity.max(1),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_added_entry_matches_found_ad() {
+        let black = vec!["@football_news_daily9".to_string()];
+        let found = find_list_match(
+            Some("football_news_daily9"),
+            "https://t.me/Football_News_Daily9",
+            &black,
+        );
+        assert_eq!(found.map(|m| m.display), Some("@football_news_daily9".to_string()));
+        assert!(find_list_match(Some("u1xbet_apt1"), "https://t.me/u1xbet_apt1", &black).is_none());
+    }
 }
