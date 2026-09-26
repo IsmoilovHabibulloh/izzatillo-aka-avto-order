@@ -94,6 +94,11 @@ function Root() {
         token={tenantToken}
         adminView={adminToken ? adminView : null}
         onSessionEnd={() => saveTenant(null, null)}
+        onAdminSession={() => {
+          // Admin tokeni foydalanuvchi joyiga yozilib qolgan — o'z joyiga ko'chiramiz.
+          saveAdmin(tenantToken);
+          saveTenant(null, null);
+        }}
       />
     );
   }

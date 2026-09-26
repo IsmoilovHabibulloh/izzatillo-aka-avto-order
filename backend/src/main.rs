@@ -12,6 +12,10 @@ use crate::admin::AdminCredentials;
 use crate::api::AppState;
 use anyhow::{Context, Result};
 use axum::Router;
+use axum::extract::Request;
+use axum::http::{HeaderValue, header};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
@@ -115,8 +119,29 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
     Router::new()
         .nest("/api", api::router(state))
         .fallback_service(frontend)
+        .layer(middleware::from_fn(static_cache_headers))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+}
+
+/// Frontend keshi: index.html (va SPA yo'llari) har safar qayta tekshiriladi —
+/// deploydan keyin brauzerda eski versiya qolib ketmasin. Nomi xeshli
+/// `assets/*` fayllari hech qachon o'zgarmaydi, ular uzoq keshlanadi.
+async fn static_cache_headers(request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_string();
+    let mut response = next.run(request).await;
+    if path == "/api" || path.starts_with("/api/") {
+        return response;
+    }
+    let value = if path.starts_with("/assets/") && response.status().is_success() {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+    response
 }
 
 fn init_tracing() {

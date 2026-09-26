@@ -53,6 +53,7 @@ import {
   PanelLog,
   QrPollResponse,
   QrStartResponse,
+  MeResponse,
   SmmBalance,
   apiFetch,
   isMaintenanceError
@@ -78,9 +79,11 @@ type AppProps = {
   adminView: AdminView | null;
   // Sessiya tugadi (chiqish yoki 401) — Root login/admin ekraniga qaytaradi.
   onSessionEnd: () => void;
+  // Token aslida admin sessiyasi ekan — Root uni admin panelga o'tkazadi.
+  onAdminSession: () => void;
 };
 
-function App({ token, adminView, onSessionEnd }: AppProps) {
+function App({ token, adminView, onSessionEnd, onAdminSession }: AppProps) {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
 
@@ -127,6 +130,10 @@ function App({ token, adminView, onSessionEnd }: AppProps) {
   useEffect(() => {
     onSessionEndRef.current = onSessionEnd;
   }, [onSessionEnd]);
+  const onAdminSessionRef = useRef(onAdminSession);
+  useEffect(() => {
+    onAdminSessionRef.current = onAdminSession;
+  }, [onAdminSession]);
 
   const handleAuthError = useCallback((err: unknown): boolean => {
     if (err instanceof ApiError && err.status === 401) {
@@ -160,6 +167,12 @@ function App({ token, adminView, onSessionEnd }: AppProps) {
       initializedRef.current = true;
       setError(null);
     } catch (err) {
+      // Eski versiya admin loginini foydalanuvchi sessiyasi sifatida saqlagan
+      // bo'lishi mumkin (server 403 qaytaradi) — rolni tekshirib, admin panelga o'tamiz.
+      if (err instanceof ApiError && err.status === 403 && (await isAdminToken(token))) {
+        onAdminSessionRef.current();
+        return;
+      }
       if (!handleAuthError(err)) {
         setError(err instanceof Error ? err.message : 'Xatolik');
       }
@@ -2307,6 +2320,14 @@ function normalizeSettings(settings: Settings): Settings {
       .filter((rule) => rule.enabled && rule.text.trim())
       .map((rule) => rule.text.trim())
   };
+}
+
+async function isAdminToken(token: string) {
+  try {
+    return (await apiFetch<MeResponse>('/me', token)).role === 'admin';
+  } catch {
+    return false;
+  }
 }
 
 function clampNumber(value: number, min: number, max: number, fallback: number) {
