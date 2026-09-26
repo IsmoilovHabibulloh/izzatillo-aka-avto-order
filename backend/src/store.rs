@@ -53,6 +53,7 @@ impl Store {
             }
         };
         state.settings = sanitize_settings(state.settings);
+        prune_stats(&mut state);
 
         // Qoida eski natijalarga ham: ilgari topilgan, lekin hech bir ro'yxatda
         // yo'q kanallar ham qora ro'yxatga o'tadi.
@@ -144,6 +145,7 @@ impl Store {
             let mut state = self.inner.write().await;
             state.settings = clean.clone();
             trim_results(&mut state);
+            prune_stats(&mut state);
         }
         self.save().await?;
         Ok(clean)
@@ -210,10 +212,12 @@ impl Store {
         let min_hour = hour - 23;
         {
             let mut state = self.inner.write().await;
+            // Scan davomida o'chirilgan key diagrammasi qaytib chiqmasin.
+            let keys = rule_keys(&state.settings);
             for (keyword, channel, title) in events {
                 let kw = keyword.trim().to_lowercase();
                 let ch = channel.trim().to_lowercase();
-                if kw.is_empty() || ch.is_empty() {
+                if kw.is_empty() || ch.is_empty() || !keys.contains(&kw) {
                     continue;
                 }
                 let channels = state.stats.entry(kw).or_default();
@@ -610,6 +614,21 @@ fn sync_legacy_keywords(settings: &mut Settings) {
         .collect();
 }
 
+fn rule_keys(settings: &Settings) -> HashSet<String> {
+    settings
+        .keyword_rules
+        .iter()
+        .map(|rule| rule.text.trim().to_lowercase())
+        .collect()
+}
+
+/// Faqat mavjud keylarning (yoqilgan yoki o'chiq) statistikasi qoladi: key
+/// o'chirilsa yoki nomi o'zgartirilsa, uning diagrammasi ham o'chadi.
+fn prune_stats(state: &mut PersistedState) {
+    let keys = rule_keys(&state.settings);
+    state.stats.retain(|keyword, _| keys.contains(keyword));
+}
+
 fn trim_results(state: &mut PersistedState) {
     let max = state.settings.max_results;
     if state.results.len() > max {
@@ -748,6 +767,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(added, strings(&["new_rival"]));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn deleted_key_loses_its_diagram() {
+        let dir = std::env::temp_dir().join(format!("vipads-store-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("state.json");
+        let now = Utc::now();
+        let mut state = PersistedState::default();
+        state.settings.keyword_rules = vec![
+            KeywordRule::new("1xbet".to_string(), 5),
+            KeywordRule::new("Line".to_string(), 5),
+        ];
+        // "1xbe" key ilgari o'chirilgan, statistikasi qolib ketgan.
+        let mut stale = crate::models::ChannelBuckets::default();
+        stale.hourly.insert(now.timestamp() / 3600, 3);
+        state
+            .stats
+            .entry("1xbe".to_string())
+            .or_default()
+            .insert("rival".to_string(), stale);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(&path, serde_json::to_vec(&state).unwrap())
+            .await
+            .unwrap();
+
+        let store = Store::load(&path).await.unwrap();
+        let keywords = |stats: Vec<KeywordStat>| {
+            stats.into_iter().map(|stat| stat.keyword).collect::<Vec<_>>()
+        };
+        assert!(store.stats_24h(&[], now).await.is_empty());
+
+        let seen = |keyword: &str| (keyword.to_string(), "rival".to_string(), None);
+        store
+            .record_appearances(&[seen("1xbet"), seen("Line"), seen("1xbe")], now)
+            .await
+            .unwrap();
+        assert_eq!(keywords(store.stats_24h(&[], now).await), strings(&["1xbet", "line"]));
+
+        // O'chirilgan (yoqib-o'chirgich bilan) key diagrammasi qoladi.
+        let mut settings = store.settings().await;
+        settings.keyword_rules[1].enabled = false;
+        store.update_settings(settings).await.unwrap();
+        assert_eq!(keywords(store.stats_24h(&[], now).await), strings(&["1xbet", "line"]));
+
+        // Key ro'yxatdan o'chirilsa — diagrammasi ham.
+        let mut settings = store.settings().await;
+        settings.keyword_rules.retain(|rule| rule.text != "Line");
+        store.update_settings(settings).await.unwrap();
+        assert_eq!(keywords(store.stats_24h(&[], now).await), strings(&["1xbet"]));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
